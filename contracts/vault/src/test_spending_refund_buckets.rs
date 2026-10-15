@@ -193,6 +193,74 @@ fn test_multi_day_cancel_does_not_inflate_new_day_capacity() {
 }
 
 #[test]
+fn test_deadline_rejection_refunds_original_day_bucket() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    env.ledger().set_timestamp(DAY_SECS * 30);
+    let (client, admin, token, _contract) = setup(&env);
+
+    let amount: i128 = 30_000;
+    let creation_day = env.ledger().timestamp() / DAY_SECS;
+    let proposal_id = propose(&client, &admin, &token, amount);
+
+    assert_eq!(client.get_daily_spent(&creation_day), amount);
+
+    // Advance past the day boundary and beyond the voting deadline
+    env.ledger().set_timestamp(DAY_SECS * 31);
+    let reject_day = env.ledger().timestamp() / DAY_SECS;
+    assert_ne!(creation_day, reject_day);
+
+    client.reject_proposal(&admin, &proposal_id, &Symbol::new(&env, "expired"));
+
+    assert_eq!(
+        client.get_daily_spent(&creation_day),
+        0,
+        "deadline rejection must credit the creation-day bucket"
+    );
+    assert_eq!(
+        client.get_daily_spent(&reject_day),
+        0,
+        "reject-day bucket must not be credited"
+    );
+}
+
+#[test]
+fn test_deadline_rejection_refunds_original_week_bucket() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    env.ledger().set_timestamp(WEEK_SECS * 6);
+    let (client, admin, token, _contract) = setup(&env);
+
+    let amount: i128 = 45_000;
+    let creation_week = env.ledger().timestamp() / WEEK_SECS;
+    let creation_day = env.ledger().timestamp() / DAY_SECS;
+    let proposal_id = propose(&client, &admin, &token, amount);
+
+    assert_eq!(client.get_weekly_spent(&creation_week), amount);
+
+    // Jump into the next week
+    env.ledger().set_timestamp(WEEK_SECS * 7);
+    let reject_week = env.ledger().timestamp() / WEEK_SECS;
+    assert_ne!(creation_week, reject_week);
+
+    client.reject_proposal(&admin, &proposal_id, &Symbol::new(&env, "expired"));
+
+    assert_eq!(
+        client.get_weekly_spent(&creation_week),
+        0,
+        "deadline rejection must credit the creation-week bucket"
+    );
+    assert_eq!(
+        client.get_weekly_spent(&reject_week),
+        0,
+        "reject-week bucket must not be credited"
+    );
+    assert_eq!(client.get_daily_spent(&creation_day), 0);
+}
+
+#[test]
 fn test_proposal_records_spend_buckets_at_creation() {
     let env = Env::default();
     env.mock_all_auths();

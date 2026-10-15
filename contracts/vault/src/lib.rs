@@ -3006,9 +3006,10 @@ impl VaultDAO {
         proposal.status = ProposalStatus::Vetoed;
         storage::set_proposal(&env, &proposal);
         storage::remove_from_priority_queue(&env, proposal.priority.clone() as u32, proposal_id);
-        storage::extend_instance_ttl(&env);
 
-        // Refund reserved spending capacity
+        // Release reservations through the shared release path so vetoes refund
+        // spending capacity and prune tag indexes consistently with other
+        // terminal transitions.
         storage::refund_spending_limits(
             &env,
             proposal.amount,
@@ -3022,6 +3023,8 @@ impl VaultDAO {
             proposal.spend_day,
             proposal.spend_week,
         );
+        storage::tag_index_prune_proposal(&env, &proposal.tags, proposal_id);
+        storage::extend_instance_ttl(&env);
 
         // Veto is not punitive ? return insurance in full
         if proposal.insurance_amount > 0 {
