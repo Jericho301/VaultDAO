@@ -37,6 +37,8 @@ export type {
 } from "./types";
 
 // Enums & errors
+export { Role, ProposalStatus, VaultErrorCode, VaultError } from "./types";
+export { SdkValidationError } from "./validation";
 export {
   Role,
   ProposalStatus,
