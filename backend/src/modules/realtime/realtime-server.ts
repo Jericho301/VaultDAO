@@ -43,6 +43,10 @@ export class RealtimeServer {
   private readonly hooks: RealtimeConnectionLifecycleHooks;
   private readonly maxSubscriptionsPerClient: number;
   private wss: WebSocketServer | null = null;
+  private onQueryTokenDeprecated?: (info: {
+    connectionId: string;
+    hasToken: boolean;
+  }) => void;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private started = false;
 
@@ -55,6 +59,12 @@ export class RealtimeServer {
   // ---------------------------------------------------------------------------
   // Lifecycle
   // ---------------------------------------------------------------------------
+
+  public setQueryTokenDeprecationHandler(
+    handler: (info: { connectionId: string; hasToken: boolean }) => void,
+  ): void {
+    this.onQueryTokenDeprecated = handler;
+  }
 
   public start(server: Server): void {
     if (this.started) {
@@ -109,6 +119,9 @@ export class RealtimeServer {
     }
 
     const connectionId = randomUUID();
+    if (token) {
+      this.onQueryTokenDeprecated?.({ connectionId, hasToken: true });
+    }
     const conn: LiveConnection = {
       id: connectionId,
       ws,

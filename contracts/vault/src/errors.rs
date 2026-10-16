@@ -12,6 +12,8 @@ pub enum VaultError {
     NotInitialized = 2,
     /// No signers provided during initialization
     NoSigners = 3,
+    /// Threshold is below the required minimum of 2 (prevents single-signer wallets)
+    ThresholdTooLow = 4,
     /// Threshold exceeds the number of signers
     ThresholdTooHigh = 5,
     /// Quorum exceeds the number of signers
@@ -91,6 +93,9 @@ pub enum VaultError {
     // Issue #1064: Streaming Rate Limiter
     StreamRateLimitExceeded = 230,
     StreamDustRejected = 231,
+    // Issue #1694: trigger_stream_payment accrual check
+    /// Requested withdrawal exceeds the amount accrued by the stream so far
+    StreamClaimExceedsAccrued = 233,
     // Issue #1075: Insurance Claim Governance
     ClaimNotFound = 240,
     ClaimNotPending = 241,
@@ -177,6 +182,12 @@ pub enum VaultError {
     /// Multi-phase proposal not found
     MultiPhaseProposalNotFound = 622,
 
+    /// A phase's amount is invalid (zero, or exceeds the phase/proposal limit)
+    PhaseAmountInvalid = 623,
+
+    /// A phase's recipient is not permitted (not whitelisted or blacklisted)
+    PhaseRecipientNotAllowed = 624,
+
     // =========================================================
     // Issue #1097: Capability Tokens
     // =========================================================
@@ -211,6 +222,16 @@ pub enum VaultError {
     RevealDeadlineNotPassed = 1106,
     /// This proposal does not use private (commit-reveal) voting
     PrivateVotingNotEnabled = 1107,
+
+    /// Cold signature was created more ledgers ago than
+    /// `ColdSignerConfig::max_cold_sig_age_ledgers` permits. Guards against a
+    /// signature produced offline long ago being submitted to approve a
+    /// proposal that did not exist when it was signed.
+    ColdSignatureTooOld = 1110,
+
+    /// Cold signature claims a creation ledger in the future, which cannot be
+    /// honest and would otherwise sidestep the maximum-age check.
+    ColdSignatureFutureDated = 1111,
 
     // =========================================================
     // Dependency graph errors (Issue #1066)
@@ -436,6 +457,88 @@ pub enum VaultError {
     PauseCooldownActive = 1127,
     /// Caller is not an emergency signer
     NotEmergencySigner = 1128,
+
+    // =========================================================
+    // Issue #1093: Signer Participation Scoring
+    // =========================================================
+    /// get_participation_rate was called with a window exceeding the 100-proposal cap
+    InvalidParticipationWindow = 1129,
+    /// Target signer is not currently in a sustained (>= 30 day) low-participation streak
+    SignerNotEligibleForForceRotation = 1130,
+    /// This signer has already approved this force-rotation request
+    ForceRotationAlreadyApprovedBySigner = 1131,
+    /// This force-rotation request has already been executed
+    ForceRotationAlreadyExecuted = 1132,
+    /// The proposed replacement address is already a signer
+    ForceRotationReplacementAlreadySigner = 1133,
+    /// No force-rotation request exists for the given ID
+    ForceRotationRequestNotFound = 1134,
+
+    // =========================================================
+    // Issue #1092: Spending Limit Reset Audit
+    // =========================================================
+    /// This signer has already approved this manual spending-limit reset request
+    SpendingLimitResetAlreadyApprovedBySigner = 1135,
+    // Issue #1527: Veto config validation
+    // =========================================================
+    /// veto_addresses is non-empty but veto_window_ledgers is 0 (veto would be silently disabled)
+    InvalidVetoConfig = 1136,
+    // Issue #1708: Swap price-impact arithmetic
+    // =========================================================
+    /// Checked arithmetic overflowed
+    ArithmeticOverflow = 1137,
+    /// Oracle returned an unusable (zero or negative) price
+    OracleError = 1138,
+    // Issue #1704: Bounded notification index
+    // =========================================================
+    /// Notification subscriber index has reached its hard cap
+    NotificationIndexFull = 1139,
+
+    // =========================================================
+    // Issue #1739: Dedicated stream / vesting / lock errors
+    // (numbered 1160+ to leave headroom for concurrently added variants)
+    // =========================================================
+    /// Streaming payment exists but is not in the Active state
+    StreamNotActive = 1160,
+    /// No vesting schedule exists with the given ID
+    VestingNotFound = 1161,
+    /// Owner already has an active token lock
+    LockAlreadyActive = 1162,
+    /// Active vesting schedule cap has been reached
+    VestingCapReached = 1163,
+    // Issue #1741: Notification preference ranges
+    /// Notification preferences are out of range: a negative
+    /// `min_amount_threshold`, or a quiet-hours offset outside one
+    /// `QUIET_HOURS_CYCLE`
+    InvalidNotificationPrefs = 1164,
+    // Issue #1748: Storage schema versioning
+    /// Stored schema version does not match this contract build; call `migrate`
+    SchemaVersionMismatch = 1140,
+
+    // =========================================================
+    // Retry configuration validation
+    // =========================================================
+    /// Retry configuration is invalid (e.g. `initial_backoff_ledgers` is zero)
+    RetryConfigInvalid = 1141,
+    // Issue #1750: change_vote deadline distinction
+    // =========================================================
+    /// Voting window for the proposal has already closed
+    VotingClosed = 1141,
+    // Dead-letter queue capacity
+    /// Dead-letter queue has reached its maximum capacity
+    DeadLetterQueueFull = 1141,
+
+    // =========================================================
+    // Rejection voting
+    // =========================================================
+    /// A reject vote was recorded but the rejection threshold has not been met
+    RejectionThresholdNotReached = 1141,
+    /// Signer has already rejected this proposal
+    AlreadyRejected = 1142,
+    // Per-proposer pending reservation cap
+    // =========================================================
+    /// A single proposer's pending reservations would exceed the per-proposer cap
+    ExceedsProposerPendingLimit = 1141,
 }
 
 // Compatibility markers for CI source checks:

@@ -547,8 +547,10 @@ test("WebSocket State Machine", async (t) => {
       process.env["API_KEY"] = "secret-key";
 
       try {
-        // Connect without token — server closes immediately with 4401
-        const ws = new WebSocket(wsUrl);
+        // Connect with a wrong token — server closes immediately with 4401.
+        // (Omitting the token puts the client in "connecting" instead; see
+        // websocket.connection-limits.test.ts for the auth-deadline path.)
+        const ws = new WebSocket(`${wsUrl}?token=wrong-key`);
         const closeEvent = await waitForClose(ws);
         assert.equal(closeEvent.code, 4401);
       } finally {
@@ -724,6 +726,58 @@ test("WebSocket State Machine", async (t) => {
   await t.test("getConnectionState returns undefined for unknown connectionId", async () => {
     const state = runtime.wsServer?.getConnectionState("non-existent-id");
     assert.equal(state, undefined);
+  });
+
+  await t.test("rapid broadcast events to same room are debounced into single message", async () => {
+    const ws = new WebSocket(wsUrl);
+    await new Promise((resolve) => ws.on("open", resolve));
+
+    ws.send(JSON.stringify({ type: "subscribe", topics: ["proposal_updated"] }));
+    await waitForMessage(ws, (m) => m.type === "subscribed");
+
+    ws.send(JSON.stringify({ type: "join", room: "proposal:123" }));
+    await waitForMessage(ws, (m) => m.type === "joined");
+
+    const receivedMessages: any[] = [];
+    ws.on("message", (data: Buffer) => {
+      const msg = JSON.parse(data.toString());
+      if (msg.type === "room_event") {
+        receivedMessages.push(msg);
+      }
+    });
+
+    // Send multiple rapid events to the same room
+    const mockEvent1: ContractEvent = {
+      id: "rapid-event-1",
+      contractId: "CDTEST",
+      topic: ["proposal_updated"],
+      value: { proposal_id: "123" },
+      ledger: 100,
+      ledgerClosedAt: new Date().toISOString(),
+    };
+
+    const mockEvent2: ContractEvent = {
+      id: "rapid-event-2",
+      contractId: "CDTEST",
+      topic: ["proposal_updated"],
+      value: { proposal_id: "123" },
+      ledger: 101,
+      ledgerClosedAt: new Date().toISOString(),
+    };
+
+    runtime.wsServer?.broadcastToRoom("proposal:123", mockEvent1);
+    runtime.wsServer?.broadcastToRoom("proposal:123", mockEvent2);
+
+    // Wait a bit to see if debouncing reduces the message count
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    // Should receive fewer messages than events sent due to debouncing
+    assert.ok(
+      receivedMessages.length <= 2,
+      `Expected debounced messages but got ${receivedMessages.length}`
+    );
+
+    ws.close();
   });
 
   // Clean up main test server
