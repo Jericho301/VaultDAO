@@ -16,6 +16,13 @@ export type {
   StreamingPayment,
   Subscription,
   Escrow,
+  EscrowMilestone,
+  EscrowMilestoneInput,
+  VestingSchedule,
+  TokenLock,
+  FundingRound,
+  FundingMilestone,
+  FundingMilestoneInput,
   ProposalTemplate,
   Comment,
   VaultMetrics,
@@ -32,6 +39,15 @@ export type {
 // Enums & errors
 export { Role, ProposalStatus, VaultErrorCode, VaultError } from "./types";
 export { SdkValidationError } from "./validation";
+export {
+  Role,
+  ProposalStatus,
+  EscrowStatus,
+  FundingRoundStatus,
+  FundingMilestoneStatus,
+  VaultErrorCode,
+  VaultError,
+} from "./types";
 
 // Error code registry
 export type { ErrorRegistryEntry } from "./errors";
@@ -49,7 +65,9 @@ export {
   buildOptions,
   connectWallet,
   buildTransaction,
+  estimateFee,
   signAndSubmit,
+  retryOnRateLimit,
   extractStateDiff,
   simulateWithStateDiff,
   simulate_with_state_diff,
@@ -83,6 +101,7 @@ export {
   // Recurring payments
   schedulePayment,
   executeRecurringPayment,
+  listRecurringPayments,
   // Streaming payments
   createStream,
   claimStream,
@@ -92,11 +111,6 @@ export {
   createSubscription,
   renewSubscription,
   cancelSubscription,
-  // Escrow
-  createEscrow,
-  completeMilestone,
-  releaseEscrow,
-  disputeEscrow,
   // Templates
   createTemplate,
   proposeFromTemplate,
@@ -111,15 +125,51 @@ export {
   executeRecovery,
   // Read functions
   getVaultMetrics,
+  getMetricsForPeriod,
   getReputation,
   getAuditTrail,
   getDelegationChain,
   // View / read-only
+  getConfig,
   getProposal,
   getRole,
   getTodaySpent,
   isSigner,
 } from "./contract";
+
+// Token flows: vesting, token locks, escrow, funding rounds
+export {
+  // Vesting
+  createVestingSchedule,
+  claimVestedTokens,
+  cancelVesting,
+  getVestingSchedule,
+  getVestingSchedulesByBeneficiary,
+  listVestingIds,
+  // Token locks
+  lockTokens,
+  extendLock,
+  unlockTokens,
+  unlockEarly,
+  getTokenLock,
+  // Escrow
+  createEscrow,
+  completeMilestone,
+  releaseEscrow,
+  disputeEscrow,
+  resolveEscrowDispute,
+  getEscrowInfo,
+  getFunderEscrows,
+  getRecipientEscrows,
+  // Funding rounds
+  createFundingRound,
+  approveFundingRound,
+  submitMilestone,
+  verifyMilestone,
+  releaseRoundFunds,
+  cancelFundingRound,
+  getFundingRound,
+} from "./token-flows";
 
 // Batch orchestration
 export {
@@ -142,6 +192,16 @@ export {
   getGlobalCache,
   destroyGlobalCache,
 } from "./cache";
+
+// Real-time proposal subscriptions
+export {
+  watchProposal,
+} from "./watch-proposal";
+export type {
+  ProposalChange,
+  ProposalChangeHandler,
+  ProposalEventType,
+} from "./watch-proposal";
 export type {
   CacheEntry,
   CacheStats,

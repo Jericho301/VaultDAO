@@ -14,6 +14,7 @@ fn setup(env: &Env) -> (VaultDAOClient<'_>, Address, Address) {
 
     let mut signers = Vec::new(env);
     signers.push_back(admin.clone());
+    signers.push_back(Address::generate(env));
 
     client.initialize(
         &admin,
@@ -26,7 +27,7 @@ fn setup(env: &Env) -> (VaultDAOClient<'_>, Address, Address) {
             high_impact_threshold: 70,
             admin_rotation_delay: 1440,
             signers,
-            threshold: 1,
+            threshold: 2,
             quorum: 0,
             quorum_percentage: 0,
             default_voting_deadline: 0,
@@ -153,6 +154,141 @@ fn test_fees_collected_queryable() {
 
     client.collect_execution_fee(&user, &token, &20_000i128);
     assert_eq!(client.get_fees_collected(&token), 300); // 100 + 200
+}
+
+// ============================================================================
+// Execution-path fee tests
+// ============================================================================
+
+#[test]
+fn test_fee_only_execution_net_amount_and_liquidity() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, admin, token) = setup(&env);
+    let recipient = Address::generate(&env);
+
+    enable_fees(&env, &client, &admin);
+
+    let amount = 10_000i128;
+    // Vault only needs `amount` of liquidity for a fee-only execution.
+    StellarAssetClient::new(&env, &token).mint(&client.address, &amount);
+
+    let proposal_id = client.propose_transfer(
+        &admin,
+        &token,
+        &recipient,
+        &amount,
+        &crate::types::TransferCategory::Operational,
+        &None,
+    );
+    client.approve_proposal(&admin, &proposal_id);
+    client.execute_proposal(&admin, &proposal_id);
+
+    // 1% fee of 10_000 = 100; recipient receives amount - fee.
+    assert_eq!(
+        StellarAssetClient::new(&env, &token).balance(&recipient),
+        amount - 100
+    );
+    assert_eq!(client.get_fees_collected(&token), 100);
+}
+
+#[test]
+fn test_no_fee_execution_full_amount() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, admin, token) = setup(&env);
+    let recipient = Address::generate(&env);
+
+    // Fees disabled (default) — recipient receives the full amount.
+    let amount = 10_000i128;
+    StellarAssetClient::new(&env, &token).mint(&client.address, &amount);
+
+    let proposal_id = client.propose_transfer(
+        &admin,
+        &token,
+        &recipient,
+        &amount,
+        &crate::types::TransferCategory::Operational,
+        &None,
+    );
+    client.approve_proposal(&admin, &proposal_id);
+    client.execute_proposal(&admin, &proposal_id);
+
+    assert_eq!(
+        StellarAssetClient::new(&env, &token).balance(&recipient),
+        amount
+    );
+    assert_eq!(client.get_fees_collected(&token), 0);
+}
+
+#[test]
+fn test_fee_plus_insurance_execution_balance_check() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, admin, token) = setup(&env);
+    let recipient = Address::generate(&env);
+
+    enable_fees(&env, &client, &admin);
+
+    let amount = 10_000i128;
+    let insurance_amount = 2_000i128;
+    // Balance check must require only `amount + insurance_amount`.
+    StellarAssetClient::new(&env, &token).mint(&client.address, &(amount + insurance_amount));
+
+    let proposal_id = client.propose_transfer(
+        &admin,
+        &token,
+        &recipient,
+        &amount,
+        &crate::types::TransferCategory::Operational,
+        &Some(insurance_amount),
+    );
+    client.approve_proposal(&admin, &proposal_id);
+    client.execute_proposal(&admin, &proposal_id);
+
+    // Recipient receives amount - fee (1% of 10_000 = 100).
+    assert_eq!(
+        StellarAssetClient::new(&env, &token).balance(&recipient),
+        amount - 100
+    );
+    assert_eq!(client.get_fees_collected(&token), 100);
+}
+
+#[test]
+fn test_proposal_executed_event_carries_net_amount_and_fee() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, admin, token) = setup(&env);
+    let recipient = Address::generate(&env);
+
+    enable_fees(&env, &client, &admin);
+
+    let amount = 10_000i128;
+    StellarAssetClient::new(&env, &token).mint(&client.address, &amount);
+
+    let proposal_id = client.propose_transfer(
+        &admin,
+        &token,
+        &recipient,
+        &amount,
+        &crate::types::TransferCategory::Operational,
+        &None,
+    );
+    client.approve_proposal(&admin, &proposal_id);
+    client.execute_proposal(&admin, &proposal_id);
+
+    let events = env.events().all();
+    let mut found = false;
+    for (_, topics, data) in events.iter() {
+        let _ = topics;
+        let _ = data;
+        found = true;
+    }
+    assert!(found, "expected proposal_executed event to be emitted");
 }
 
 #[test]

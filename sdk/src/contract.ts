@@ -9,15 +9,15 @@
  * decodes and returns the on-chain value without requiring a signature.
  */
 
-import { SorobanRpc, xdr } from "stellar-sdk";
+import { SorobanRpc, xdr } from "@stellar/stellar-sdk";
 import type {
   InitConfig,
+  VaultConfig,
   Proposal,
   RecurringPayment,
   SdkOptions,
   StreamingPayment,
   Subscription,
-  Escrow,
   ProposalTemplate,
   Comment,
   VaultMetrics,
@@ -36,6 +36,7 @@ import {
   symbolToScVal,
   decodeScVal,
   parseError,
+  retryOnRateLimit,
 } from "./utils";
 import {
   validateNonEmptyString,
@@ -57,7 +58,8 @@ import {
 // Internal helper — simulate a read-only call and decode the return value
 // ---------------------------------------------------------------------------
 
-async function simulateReadOnly<T>(
+/** @internal Shared with token-flows.ts; not part of the public API. */
+export async function simulateReadOnly<T>(
   operation: xdr.Operation,
   opts: SdkOptions,
   sourceKey: string,
@@ -65,21 +67,27 @@ async function simulateReadOnly<T>(
 ): Promise<T> {
   const log: SdkLogger = opts.logger ?? noopLogger;
   const server = new SorobanRpc.Server(opts.rpcUrl, { allowHttp: false });
-  const { Account, TransactionBuilder, BASE_FEE } = await import("stellar-sdk");
-  const account = await server.getAccount(sourceKey);
-  const tx = new TransactionBuilder(account, {
-    fee: BASE_FEE,
-    networkPassphrase: opts.networkPassphrase,
-  })
-    .addOperation(operation)
-    .setTimeout(15)
-    .build();
-
+  const { TransactionBuilder, BASE_FEE } = await import("@stellar/stellar-sdk");
   const ctx = { contractId: opts.contractId, method };
   const simStart = Date.now();
   log.debug("Simulating read-only call", ctx);
 
-  const sim = await server.simulateTransaction(tx);
+  const sim = await retryOnRateLimit(
+    async () => {
+      const account = await server.getAccount(sourceKey);
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: opts.networkPassphrase,
+      })
+        .addOperation(operation)
+        .setTimeout(15)
+        .build();
+      return server.simulateTransaction(tx);
+    },
+    opts,
+    log,
+    "read-only simulation"
+  );
 
   if (SorobanRpc.Api.isSimulationError(sim)) {
     const durationMs = Date.now() - simStart;
@@ -111,9 +119,9 @@ async function simulateReadOnly<T>(
  * Wrap `buildTransaction` with before/after logger events for every
  * contract method invocation.
  *
- * @internal
+ * @internal Shared with token-flows.ts; not part of the public API.
  */
-async function invokeMethod(
+export async function invokeMethod(
   method: string,
   callerPublicKey: string,
   operation: xdr.Operation,
@@ -524,6 +532,51 @@ export async function executeRecurringPayment(
   return buildTransaction(callerPublicKey, op, opts);
 }
 
+/**
+ * List all recurring payments with pagination.
+ *
+ * Fetches a paginated list of recurring payments, handling RecurringNotFound
+ * gracefully when the end of the list is reached.
+ *
+ * @param callerPublicKey - Any valid Stellar public key (used as simulation source).
+ * @param offset          - Starting index for pagination (0-based).
+ * @param limit           - Maximum number of payments to return per page.
+ * @param opts            - SDK connection options.
+ * @returns               Array of RecurringPayment objects for the requested page.
+ */
+export async function listRecurringPayments(
+  callerPublicKey: string,
+  offset: bigint,
+  limit: bigint,
+  opts: SdkOptions
+): Promise<RecurringPayment[]> {
+  const contract = getContract(opts);
+  const op = contract.call(
+    "list_recurring_payments",
+    u64ToScVal(offset),
+    u64ToScVal(limit)
+  );
+  const raw = await simulateReadOnly<Record<string, unknown>[]>(
+    op,
+    opts,
+    callerPublicKey,
+    "listRecurringPayments"
+  );
+
+  return raw.map((p) => ({
+    id: BigInt(p.id as number),
+    proposer: p.proposer as string,
+    recipient: p.recipient as string,
+    token: p.token as string,
+    amount: BigInt(p.amount as number),
+    memo: p.memo as string,
+    interval: BigInt(p.interval as number),
+    nextPaymentLedger: BigInt(p.next_payment_ledger as number),
+    paymentCount: Number(p.payment_count),
+    isActive: p.is_active as boolean,
+  }));
+}
+
 // ---------------------------------------------------------------------------
 // Streaming Payments
 // ---------------------------------------------------------------------------
@@ -761,6 +814,8 @@ export async function disputeEscrow(
   const op = contract.call("dispute_escrow", u64ToScVal(escrowId));
   return buildTransaction(partyPublicKey, op, opts);
 }
+// Escrow helpers live in token-flows.ts alongside vesting, token locks and
+// funding rounds.
 
 // ---------------------------------------------------------------------------
 // Templates
@@ -899,7 +954,7 @@ export async function getComments(
   validateNonEmptyString("callerPublicKey", callerPublicKey);
 
   const contract = getContract(opts);
-  const op = contract.call("get_comments", u64ToScVal(proposalId));
+  const op = contract.call("get_proposal_comments", u64ToScVal(proposalId));
   const raw = await simulateReadOnly<Record<string, unknown>[]>(
     op,
     opts,
@@ -984,7 +1039,7 @@ export async function getVaultMetrics(
   validateNonEmptyString("callerPublicKey", callerPublicKey);
 
   const contract = getContract(opts);
-  const op = contract.call("get_vault_metrics");
+  const op = contract.call("get_metrics");
   const raw = await simulateReadOnly<Record<string, unknown>>(
     op,
     opts,
@@ -992,10 +1047,51 @@ export async function getVaultMetrics(
     "getVaultMetrics"
   );
   return {
+    totalProposals: BigInt(raw.total_proposals as number),
     executedCount: BigInt(raw.executed_count as number),
     rejectedCount: BigInt(raw.rejected_count as number),
     expiredCount: BigInt(raw.expired_count as number),
-    totalVolume: BigInt(raw.total_volume as number),
+    totalExecutionTimeLedgers: BigInt(raw.total_execution_time_ledgers as number),
+    totalGasUsed: BigInt(raw.total_gas_used as number),
+    lastUpdatedLedger: BigInt(raw.last_updated_ledger as number),
+  };
+}
+
+/**
+ * Get vault metrics for a specific weekly period.
+ *
+ * @param callerPublicKey - Any valid Stellar public key (used as simulation source).
+ * @param fromWeek        - Start week number (inclusive).
+ * @param toWeek          - End week number (inclusive).
+ * @param opts            - SDK connection options.
+ * @returns               Aggregated VaultMetrics for the requested period.
+ */
+export async function getMetricsForPeriod(
+  callerPublicKey: string,
+  fromWeek: bigint,
+  toWeek: bigint,
+  opts: SdkOptions
+): Promise<VaultMetrics> {
+  const contract = getContract(opts);
+  const op = contract.call(
+    "get_metrics_for_period",
+    u64ToScVal(fromWeek),
+    u64ToScVal(toWeek)
+  );
+  const raw = await simulateReadOnly<Record<string, unknown>>(
+    op,
+    opts,
+    callerPublicKey,
+    "getMetricsForPeriod"
+  );
+  return {
+    totalProposals: BigInt(raw.total_proposals as number),
+    executedCount: BigInt(raw.executed_count as number),
+    rejectedCount: BigInt(raw.rejected_count as number),
+    expiredCount: BigInt(raw.expired_count as number),
+    totalExecutionTimeLedgers: BigInt(raw.total_execution_time_ledgers as number),
+    totalGasUsed: BigInt(raw.total_gas_used as number),
+    lastUpdatedLedger: BigInt(raw.last_updated_ledger as number),
   };
 }
 
@@ -1028,16 +1124,27 @@ export async function getReputation(
 }
 
 /**
- * Get audit trail entries.
+ * Get audit trail entries with pagination.
+ *
+ * @param callerPublicKey - Any valid Stellar public key (used as simulation source).
+ * @param opts            - SDK options (network, contract ID, etc.).
+ * @param offset          - Zero-based entry offset (default: 0).
+ * @param limit           - Number of entries to return, capped at 50 on-chain (default: 50).
  */
 export async function getAuditTrail(
   callerPublicKey: string,
-  opts: SdkOptions
+  opts: SdkOptions,
+  offset: bigint = 0n,
+  limit: number = 50
 ): Promise<AuditEntry[]> {
   validateNonEmptyString("callerPublicKey", callerPublicKey);
 
   const contract = getContract(opts);
-  const op = contract.call("get_audit_trail");
+  const op = contract.call(
+    "get_audit_trail",
+    u64ToScVal(offset),
+    u32ToScVal(limit)
+  );
   const raw = await simulateReadOnly<Record<string, unknown>[]>(
     op,
     opts,
@@ -1072,6 +1179,36 @@ export async function getDelegationChain(
 // ---------------------------------------------------------------------------
 // View / Read-only Functions
 // ---------------------------------------------------------------------------
+
+/**
+ * Fetch the current vault configuration without submitting a transaction.
+ *
+ * @param callerPublicKey - Any valid Stellar public key (used as simulation source).
+ * @param opts            - SDK connection options.
+ * @returns               The current vault configuration.
+ */
+export async function getConfig(
+  callerPublicKey: string,
+  opts: SdkOptions
+): Promise<VaultConfig> {
+  const contract = getContract(opts);
+  const op = contract.call("get_config");
+  const raw = await simulateReadOnly<Record<string, unknown>>(
+    op,
+    opts,
+    callerPublicKey,
+    "getConfig"
+  );
+  return {
+    signers: (raw.signers as string[]) || [],
+    threshold: Number(raw.threshold) || 0,
+    spendingLimit: BigInt(raw.spending_limit as number) || 0n,
+    dailyLimit: BigInt(raw.daily_limit as number) || 0n,
+    weeklyLimit: BigInt(raw.weekly_limit as number) || 0n,
+    timelockThreshold: BigInt(raw.timelock_threshold as number) || 0n,
+    timelockDelay: BigInt(raw.timelock_delay as number) || 0n,
+  };
+}
 
 /**
  * Fetch a proposal by ID without submitting a transaction.

@@ -56,7 +56,7 @@ export class ContractCache {
   private stats: CacheStats = { hits: 0, misses: 0, evictions: 0 };
   private defaultTtl: number; // milliseconds
   private maxEntries: number;
-  private cleanupInterval: NodeJS.Timeout | null = null;
+  private cleanupInterval: ReturnType<typeof setInterval> | null = null;
 
   constructor(defaultTtlSeconds: number = 60, maxEntries: number = 1000) {
     this.defaultTtl = defaultTtlSeconds * 1000;
@@ -69,7 +69,10 @@ export class ContractCache {
    * Generate a cache key from contract context and parameters
    */
   private getKey(contractId: string, functionName: string, params: unknown): string {
-    return hashParams(contractId, functionName, params);
+    // Keep the contractId:functionName prefix in clear text (not just hashed
+    // in) so clearFunction()/clearContract() can find matching keys via
+    // startsWith() below.
+    return contractId + ':' + functionName + ':' + hashParams(contractId, functionName, params);
   }
 
   /**

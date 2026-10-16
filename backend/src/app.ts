@@ -46,16 +46,25 @@ import { createJsonWithRawBody, createHmacSigningMiddleware } from "./shared/htt
 import { ErrorCode } from "./shared/http/errorCodes.js";
 import {
   REQUEST_ID_HEADER,
-  generateRequestId,
   requestIdStorage,
+  resolveRequestId,
 } from "./shared/http/requestId.js";
 import { createRequestLogger } from "./shared/http/requestLogger.js";
 import { createRequestContextMiddleware } from "./shared/http/requestContext.js";
 import { createErrorMiddleware } from "./shared/errors/handleError.js";
 import { CorsAllowlist } from "./shared/http/corsAllowlist.js";
-import { initFeatureFlags, getFeatureFlags } from "./shared/feature-flags.js";
+import {
+  initFeatureFlags,
+  getFeatureFlags,
+  isKnownFlag,
+  KNOWN_FLAGS,
+} from "./shared/feature-flags.js";
 import { initRpcPool } from "./shared/rpc-pool.js";
 import { createDrainMiddleware } from "./shared/http/drain.js";
+import { createLogger } from "./shared/logging/logger.js";
+import { getSqlitePool, isPrivateDatabase } from "./shared/storage/sqlite-pool.js";
+
+const logger = createLogger("app");
 
 export async function createApp(env: BackendEnv, runtime: BackendRuntime) {
   const app = express();
@@ -137,7 +146,7 @@ export async function createApp(env: BackendEnv, runtime: BackendRuntime) {
 
   // Request ID middleware
   app.use((req: Request, res: Response, next: NextFunction) => {
-    const id = req.get(REQUEST_ID_HEADER) ?? generateRequestId();
+    const id = resolveRequestId(req.get(REQUEST_ID_HEADER));
     res.set(REQUEST_ID_HEADER, id);
     (req as any).requestId = id;
     requestIdStorage.run(id, next);
@@ -147,30 +156,46 @@ export async function createApp(env: BackendEnv, runtime: BackendRuntime) {
   // `req.requestId` is already populated when the context is built.
   app.use(createRequestContextMiddleware());
 
-  // Global rate limiter — catch-all DoS protection for all endpoints (1000 req/min per IP)
+  // Trust proxy configuration from environment (Issue #1773)
+  if (env.trustProxy !== undefined) {
+    app.set("trust proxy", env.trustProxy);
+  }
+
+  // Global rate limiter — catch-all DoS protection for non-API endpoints (1000 req/min per IP)
   // Token-bucket algorithm: smooth burst tolerance, no fixed-window double-spend.
   // Gated on env.rateLimitEnabled so tests and development can disable it cleanly.
-  const makeRateLimiter = (maxRequests: number) =>
+  const makeRateLimiter = (maxRequests: number, keyPrefix?: string) =>
     env.rateLimitEnabled
       ? createRateLimitMetricsMiddleware(
-          createRateLimitMiddleware({ windowMs: 60 * 1000, maxRequests }),
+          createRateLimitMiddleware({
+            windowMs: 60 * 1000,
+            maxRequests,
+            keyPrefix,
+            trustProxy: Boolean(env.trustProxy),
+          }),
           runtime.metricsRegistry,
         )
       : (_req: Request, _res: Response, next: NextFunction) => next();
 
-  const globalRateLimiter = makeRateLimiter(1000);
-  app.use(globalRateLimiter);
+  const globalRateLimiter = makeRateLimiter(1000, "global");
+  // Apply global rate limiter to non-API routes to avoid double counting /api/v1 requests (Issue #1774)
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    if (req.path.startsWith("/api/v1")) {
+      return next();
+    }
+    return globalRateLimiter(req, res, next);
+  });
 
   // Rate limiting middleware — different limits per endpoint type
   // Health/readiness probes: 300 req/min (high-frequency monitoring)
-  const healthRateLimiter = makeRateLimiter(300);
+  const healthRateLimiter = makeRateLimiter(300, "health");
   app.use("/health", healthRateLimiter);
   app.use("/ready", healthRateLimiter);
 
   // Write endpoints (POST/PUT/PATCH/DELETE): configurable, default 10 req/min
-  const writeRateLimiter = makeRateLimiter(env.rateLimitExecutePerMin);
+  const writeRateLimiter = makeRateLimiter(env.rateLimitExecutePerMin, "v1-write");
   // Read endpoints (GET): configurable, default 60 req/min
-  const readRateLimiter = makeRateLimiter(env.rateLimitDefaultPerMin);
+  const readRateLimiter = makeRateLimiter(env.rateLimitDefaultPerMin, "v1-read");
   // Apply method-aware rate limiter to all /api/v1 routes
   app.use("/api/v1", (req: Request, res: Response, next: NextFunction) => {
     if (["POST", "PUT", "PATCH", "DELETE"].includes(req.method)) {
@@ -188,9 +213,7 @@ export async function createApp(env: BackendEnv, runtime: BackendRuntime) {
     undefined,
     () => {
       // Never log key material; only emit rotation-stage usage warning.
-      console.warn(
-        "[auth] request authenticated with old API key while rotation is pending",
-      );
+      logger.warn("request authenticated with old API key while rotation is pending");
     },
   );
   // Admin routes accept only the current primary key, never the staged next
@@ -250,7 +273,16 @@ export async function createApp(env: BackendEnv, runtime: BackendRuntime) {
   // ── Admin Audit Log ──────────────────────────────────────────────────────────
   // Records every call under /admin — including rejected auth attempts — so a
   // compromised Admin key leaves a trail of what was accessed or changed.
-  const adminAuditLogStore = new AdminAuditLogStore(env.databasePath ?? ":memory:");
+  // The trail must outlive the process, so production refuses to fall back to
+  // a private in-memory database.
+  if (env.nodeEnv === "production" && isPrivateDatabase(env.databasePath ?? "")) {
+    throw new Error(
+      "DATABASE_PATH must point to a persistent SQLite file in production; the admin audit log cannot be kept in memory.",
+    );
+  }
+  const adminAuditLogStore = new AdminAuditLogStore(
+    getSqlitePool(env.databasePath ?? ":memory:", { size: env.sqlitePoolSize }),
+  );
   v1Router.use("/admin", createAdminAuditLogMiddleware(adminAuditLogStore));
 
   v1Router.get(
@@ -285,9 +317,9 @@ export async function createApp(env: BackendEnv, runtime: BackendRuntime) {
       const result = authKeyState.rotate();
 
       // Never log key material — only the fact and time of the rotation.
-      console.warn(
-        `[auth] API key rotated at ${result.rotatedAt}; previous key invalidated`,
-      );
+      logger.warn("API key rotated; previous key invalidated", {
+        rotatedAt: result.rotatedAt,
+      });
 
       res.status(200).json({ success: true, data: result });
     } catch (err) {
@@ -329,7 +361,12 @@ export async function createApp(env: BackendEnv, runtime: BackendRuntime) {
   v1Router.use("/status", createStatusRouter(env, runtime));
   v1Router.use("/metrics", createMetricsRouter(runtime, adminAuthMiddleware));
   v1Router.use("/health", createDetailedHealthRouter(env, runtime));
-  v1Router.use("/events", authMiddleware, hmacMiddleware, createEventsRouter());
+  v1Router.use(
+    "/events",
+    authMiddleware,
+    hmacMiddleware,
+    createEventsRouter(runtime.sseBroadcaster),
+  );
 
   // Contracts listing
   const registry = new (
@@ -402,14 +439,23 @@ export async function createApp(env: BackendEnv, runtime: BackendRuntime) {
     success(res, getFeatureFlags().list());
   });
 
+  const rejectUnknownFlag = (res: express.Response, flag: string) =>
+    error(res, {
+      message: `Unknown feature flag "${flag}". Known flags: ${KNOWN_FLAGS.join(", ")}`,
+      status: 404,
+      code: ErrorCode.NOT_FOUND,
+    });
+
   v1Router.post("/admin/features/:flag/enable", adminAuthMiddleware, hmacMiddleware, (req, res) => {
     const { flag } = req.params as { flag: string };
+    if (!isKnownFlag(flag)) return rejectUnknownFlag(res, flag);
     getFeatureFlags().enable(flag);
     success(res, { flag, enabled: true });
   });
 
   v1Router.post("/admin/features/:flag/disable", adminAuthMiddleware, hmacMiddleware, (req, res) => {
     const { flag } = req.params as { flag: string };
+    if (!isKnownFlag(flag)) return rejectUnknownFlag(res, flag);
     getFeatureFlags().disable(flag);
     success(res, { flag, enabled: false });
   });
@@ -421,6 +467,7 @@ export async function createApp(env: BackendEnv, runtime: BackendRuntime) {
 
   v1Router.use(
     "/contracts",
+    authMiddleware,
     hmacMiddleware,
     createContractsRouter(registry, adminAuthMiddleware, (runtime as any).contractStateValidator),
   );
@@ -429,6 +476,7 @@ export async function createApp(env: BackendEnv, runtime: BackendRuntime) {
   if (runtime.jobManager && runtime.scheduledJobRunner) {
     v1Router.use(
       "/jobs",
+      authMiddleware,
       hmacMiddleware,
       createJobsRouter(runtime.jobManager, runtime.scheduledJobRunner, adminAuthMiddleware),
     );

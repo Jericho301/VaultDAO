@@ -2,7 +2,7 @@
 //!
 //! Standardized events for proposal lifecycle and admin actions.
 
-use crate::types::ProposalAmendment;
+use crate::types::{ProposalAmendment, SignerTier};
 use soroban_sdk::{Address, Env, Symbol, Vec};
 
 /// Emit when contract is initialized
@@ -90,14 +90,19 @@ pub fn emit_proposal_ready(env: &Env, proposal_id: u64, unlock_ledger: u64) {
     );
 }
 
-/// Emit when a proposal is executed (enhanced: includes token and ledger)
+/// Emit when a proposal is executed (enhanced: includes token and ledger).
+///
+/// Publishes both `net_amount` (what the recipient actually received) and
+/// `fee_amount` (what was withheld) so off-chain observers can distinguish
+/// the gross payout from the net payout without replaying fee logic.
 pub fn emit_proposal_executed(
     env: &Env,
     proposal_id: u64,
     executor: &Address,
     recipient: &Address,
     token: &Address,
-    amount: i128,
+    net_amount: i128,
+    fee_amount: i128,
     ledger: u64,
 ) {
     env.events().publish(
@@ -106,7 +111,8 @@ pub fn emit_proposal_executed(
             executor.clone(),
             recipient.clone(),
             token.clone(),
-            amount,
+            net_amount,
+            fee_amount,
             ledger,
         ),
     );
@@ -164,6 +170,26 @@ pub fn emit_delegated_vote(
     );
 }
 
+/// Emit when a delegated vote is skipped for a voter.
+///
+/// # Arguments
+/// * `proposal_id` - The proposal the delegated vote applied to.
+/// * `voter` - The skipped voter (the delegator whose vote was skipped).
+/// * `signer` - The acting signer (the delegate) that skipped the vote.
+/// * `reason` - Why the vote was skipped, e.g. `abstained` or `approved`.
+pub fn emit_delegated_vote_skipped(
+    env: &Env,
+    proposal_id: u64,
+    voter: &Address,
+    signer: &Address,
+    reason: &Symbol,
+) {
+    env.events().publish(
+        (Symbol::new(env, "delegated_vote_skipped"), proposal_id),
+        (voter.clone(), signer.clone(), reason.clone()),
+    );
+}
+
 pub fn emit_proposal_scheduled(
     env: &Env,
     proposal_id: u64,
@@ -181,6 +207,87 @@ pub fn emit_proposal_rejected(env: &Env, proposal_id: u64, rejector: &Address, p
     env.events().publish(
         (Symbol::new(env, "proposal_rejected"), proposal_id),
         (rejector.clone(), proposer.clone()),
+    );
+}
+
+/// Emit when a signer casts a rejection vote, tracking progress toward the
+/// rejection threshold.
+///
+/// Topics: `("proposal_rejection_vote", proposal_id)`
+/// Data:   `(voter, rejection_vote_count, required_threshold)`
+///
+/// `rejection_vote_count` is the cumulative number of rejection votes recorded
+/// for the proposal after this vote; `required_threshold` is the number of
+/// rejection votes needed to reject the proposal outright.
+pub fn emit_proposal_rejection_vote(
+    env: &Env,
+    proposal_id: u64,
+    voter: &Address,
+    rejection_vote_count: u32,
+    required_threshold: u32,
+) {
+    env.events().publish(
+        (Symbol::new(env, "proposal_rejection_vote"), proposal_id),
+        (voter.clone(), rejection_vote_count, required_threshold),
+    );
+}
+
+/// Emit when a signer explicitly rejects a proposal via `reject_proposal` (Issue #1522).
+///
+/// Published under the same `proposal_rejected` topic as `emit_proposal_rejected` since
+/// that is the on-chain event name integrators watch, but carries the vault-wide
+/// cumulative rejection count instead of the proposer.
+pub fn emit_proposal_explicit_rejection(
+    env: &Env,
+    proposal_id: u64,
+    rejector: &Address,
+    total_rejection_count: u64,
+) {
+    env.events().publish(
+        (Symbol::new(env, "proposal_rejected"), proposal_id),
+        (rejector.clone(), total_rejection_count),
+    );
+}
+
+/// Emit each time a rejection vote is accumulated on a proposal, before the
+/// proposal has necessarily reached its final rejected state.
+///
+/// This lets indexers observe partial rejection progress (how many rejection
+/// votes have been cast so far and how many are still needed) rather than only
+/// seeing the terminal `proposal_rejected` transition.
+///
+/// Topics: `("proposal_rejection_vote", proposal_id)`
+/// Data:   `(rejector, rejection_count, rejection_threshold)`
+pub fn emit_proposal_rejection_vote(
+    env: &Env,
+    proposal_id: u64,
+    rejector: &Address,
+    rejection_count: u32,
+    rejection_threshold: u32,
+) {
+    env.events().publish(
+        (Symbol::new(env, "proposal_rejection_vote"), proposal_id),
+        (rejector.clone(), rejection_count, rejection_threshold),
+    );
+}
+
+/// Emit when a proposal transitions into its final rejected state as a result
+/// of accumulated rejection votes.
+///
+/// Distinct from `emit_proposal_rejection_vote` so indexers can tell the final
+/// rejection transition apart from intermediate rejection-vote progress.
+///
+/// Topics: `("proposal_rejection_final", proposal_id)`
+/// Data:   `(rejection_count, rejection_threshold)`
+pub fn emit_proposal_rejection_final(
+    env: &Env,
+    proposal_id: u64,
+    rejection_count: u32,
+    rejection_threshold: u32,
+) {
+    env.events().publish(
+        (Symbol::new(env, "proposal_rejection_final"), proposal_id),
+        (rejection_count, rejection_threshold),
     );
 }
 
@@ -212,6 +319,40 @@ pub fn emit_proposal_vetoed(env: &Env, proposal_id: u64, vetoer: &Address) {
     env.events().publish(
         (Symbol::new(env, "proposal_vetoed"), proposal_id),
         vetoer.clone(),
+    );
+}
+
+/// Emit when an address is added to the veto list.
+pub fn emit_veto_addr_added(env: &Env, admin: &Address, addr: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "veto_addr_added"),),
+        (admin.clone(), addr.clone()),
+    );
+}
+
+/// Emit when an address is removed from the veto list.
+pub fn emit_veto_addr_removed(env: &Env, admin: &Address, addr: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "veto_addr_removed"),),
+        (admin.clone(), addr.clone()),
+    );
+}
+
+/// Emit when an address is added to or removed from a recipient list.
+/// `mode` is `whitelist`, `blacklist`, `wl_entry` or `list_mode` (mode change,
+/// where `addr` is the acting admin and `added` is true when a list is enabled).
+pub fn emit_recipient_list_changed(env: &Env, mode: Symbol, addr: &Address, added: bool) {
+    env.events().publish(
+        (Symbol::new(env, "recipient_list_changed"),),
+        (mode, addr.clone(), added),
+    );
+}
+
+/// Emit once for a bulk recipient list change with the addresses actually changed.
+pub fn emit_recipient_list_bulk_changed(env: &Env, mode: Symbol, addrs: Vec<Address>, added: bool) {
+    env.events().publish(
+        (Symbol::new(env, "recipient_list_bulk_changed"),),
+        (mode, addrs, added),
     );
 }
 
@@ -806,6 +947,18 @@ pub fn emit_dead_letter_processed(env: &Env, record_id: u64, admin: &Address) {
     );
 }
 
+pub fn emit_dead_letter_requeued(
+    env: &Env,
+    record_id: u64,
+    proposal_id: u64,
+    admin: &Address,
+) {
+    env.events().publish(
+        (Symbol::new(env, "dead_letter_requeued"), record_id),
+        (proposal_id, admin.clone()),
+    );
+}
+
 // ============================================================================
 // Subscription Events (feature/subscription-system)
 // ============================================================================
@@ -1111,6 +1264,33 @@ pub fn emit_recovery_config_updated(env: &Env, admin: &Address) {
         .publish((Symbol::new(env, "recovery_config"),), admin.clone());
 }
 
+/// Emit when a recovery config change proposal is created (Issue #1702)
+pub fn emit_recovery_config_proposal_created(env: &Env, proposal_id: u64, proposer: &Address) {
+    env.events().publish(
+        (
+            Symbol::new(env, "recovery_config_proposal_created"),
+            proposal_id,
+        ),
+        proposer.clone(),
+    );
+}
+
+/// Emit when a recovery config change proposal is approved (Issue #1702)
+pub fn emit_recovery_config_proposal_approved(
+    env: &Env,
+    proposal_id: u64,
+    voter: &Address,
+    approval_count: u32,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "recovery_config_proposal_approved"),
+            proposal_id,
+        ),
+        (voter.clone(), approval_count),
+    );
+}
+
 /// Emit when a recovery proposal is created
 pub fn emit_recovery_proposed(env: &Env, proposal_id: u64, new_threshold: u32) {
     env.events().publish(
@@ -1131,6 +1311,23 @@ pub fn emit_recovery_approved(env: &Env, proposal_id: u64, guardian: &Address) {
 pub fn emit_recovery_executed(env: &Env, proposal_id: u64) {
     env.events()
         .publish((Symbol::new(env, "recovery_executed"), proposal_id), ());
+}
+
+/// Emit when in-flight proposals are invalidated because the signer set changed
+/// through a recovery execution. `affected_ids` contains every proposal whose
+/// approval slate was wiped and whose status was reset to Pending.
+pub fn emit_proposals_invalidated_by_recovery(
+    env: &Env,
+    recovery_proposal_id: u64,
+    affected_ids: Vec<u64>,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "proposals_invalidated"),
+            recovery_proposal_id,
+        ),
+        affected_ids,
+    );
 }
 
 /// Emit when a recovery proposal is cancelled
@@ -2013,5 +2210,437 @@ pub fn emit_proposal_auto_cancelled_limit_exceeded(
             proposal_id,
         ),
         (reason, admin.clone()),
+    );
+}
+
+/// Emit a summary of a batch auto-cancellation of proposals.
+///
+/// Published once per batch so indexers can observe the full set of proposals
+/// that were cancelled together, along with the total count.
+///
+/// Topics: `("proposals_auto_cancelled",)`
+/// Data:   `(cancelled_ids, count)`
+pub fn emit_proposals_auto_cancelled_summary(env: &Env, cancelled_ids: Vec<u64>, count: u32) {
+    env.events().publish(
+        (Symbol::new(env, "proposals_auto_cancelled"),),
+        (cancelled_ids, count),
+    );
+}
+
+/// Emit when a signer's rolling participation rate has stayed below
+/// `Config.min_participation_rate` for `Config.low_participation_consecutive_proposals`
+/// proposals in a row (Issue #1093).
+pub fn emit_low_participation_alert(
+    env: &Env,
+    signer: &Address,
+    participation_rate: u32,
+    threshold: u32,
+    consecutive_low_periods: u32,
+) {
+    env.events().publish(
+        (Symbol::new(env, "low_participation_alert"), signer.clone()),
+        (participation_rate, threshold, consecutive_low_periods),
+    );
+}
+
+/// Emit when an underperforming signer is force-rotated out via a completed
+/// force-rotation governance vote (Issue #1093).
+pub fn emit_signer_force_rotated(
+    env: &Env,
+    target: &Address,
+    replacement: &Address,
+    request_id: u64,
+) {
+    env.events().publish(
+        (Symbol::new(env, "signer_force_rotated"), request_id),
+        (target.clone(), replacement.clone()),
+    );
+}
+
+/// Emit when a signer's tier is changed, so indexers can track tier
+/// transitions without polling every signer on every block.
+pub fn emit_signer_tier_changed(
+    env: &Env,
+    signer: &Address,
+    old_tier: &SignerTier,
+    new_tier: &SignerTier,
+) {
+    env.events().publish(
+        (Symbol::new(env, "signer_tier_changed"), signer.clone()),
+        (old_tier.clone(), new_tier.clone()),
+    );
+}
+
+/// Emit when a signer is one transfer away from the velocity sliding-window cap.
+pub fn emit_velocity_warning(env: &Env, addr: &Address, remaining_capacity: u32) {
+    env.events().publish(
+        (Symbol::new(env, "velocity_warning"), addr.clone()),
+        remaining_capacity,
+    );
+}
+
+// ============================================================================
+// Issue #1692: Signers Replaced Event
+// ============================================================================
+
+/// Emit when the entire signer set is replaced via a governance-approved
+/// config-change proposal.
+///
+/// Topics: `("signers_replaced",)`
+/// Data:   `(actor, old_count, new_count)`
+pub fn emit_signers_replaced(env: &Env, actor: &Address, old_count: u32, new_count: u32) {
+    env.events().publish(
+        (Symbol::new(env, "signers_replaced"),),
+        (actor.clone(), old_count, new_count),
+    );
+}
+
+// ============================================================================
+// Issue #1732: Recurring Payment Status Events
+// ============================================================================
+
+/// Emit when a recurring payment is paused.
+///
+/// Topics: `("recurring_paused", payment_id)`
+/// Data:   `(caller, paused_at_ledger)`
+pub fn emit_recurring_paused(env: &Env, payment_id: u64, caller: &Address, paused_at: u64) {
+    env.events().publish(
+        (Symbol::new(env, "recurring_paused"), payment_id),
+        (caller.clone(), paused_at),
+    );
+}
+
+/// Emit when a recurring payment is resumed.
+///
+/// Topics: `("recurring_resumed", payment_id)`
+/// Data:   `(caller, next_payment_ledger)`
+pub fn emit_recurring_resumed(env: &Env, payment_id: u64, caller: &Address, next_ledger: u64) {
+    env.events().publish(
+        (Symbol::new(env, "recurring_resumed"), payment_id),
+        (caller.clone(), next_ledger),
+    );
+}
+
+/// Emit when a recurring payment is stopped (or moved to Stopping).
+///
+/// Topics: `("recurring_stopped", payment_id)`
+/// Data:   `(caller, stopping)` where `stopping` is true if grace executions remain.
+pub fn emit_recurring_stopped(env: &Env, payment_id: u64, caller: &Address, stopping: bool) {
+    env.events().publish(
+        (Symbol::new(env, "recurring_stopped"), payment_id),
+        (caller.clone(), stopping),
+    );
+}
+
+// ============================================================================
+// Issue #1733: Capability Token Events
+// ============================================================================
+
+/// Emit when a capability token is granted.
+///
+/// Topics: `("capability_granted", token_id)`
+/// Data:   `(admin, holder, capability_count, expires_at, max_uses)`
+pub fn emit_capability_granted(
+    env: &Env,
+    token_id: &soroban_sdk::BytesN<32>,
+    admin: &Address,
+    holder: &Address,
+    capability_count: u32,
+    expires_at: u32,
+    max_uses: u32,
+) {
+    env.events().publish(
+        (Symbol::new(env, "capability_granted"), token_id.clone()),
+        (
+            admin.clone(),
+            holder.clone(),
+            capability_count,
+            expires_at,
+            max_uses,
+        ),
+    );
+}
+
+/// Emit when a capability token is revoked.
+///
+/// Topics: `("capability_revoked", token_id)`
+/// Data:   `(admin, holder)`
+pub fn emit_capability_revoked(
+    env: &Env,
+    token_id: &soroban_sdk::BytesN<32>,
+    admin: &Address,
+    holder: &Address,
+) {
+    env.events().publish(
+        (Symbol::new(env, "capability_revoked"), token_id.clone()),
+        (admin.clone(), holder.clone()),
+    );
+}
+
+// ============================================================================
+// Issue #1734: Tag Taxonomy Events
+// ============================================================================
+
+/// Emit when a hierarchical tag is created.
+///
+/// Topics: `("tag_created", tag_id)`
+/// Data:   `(caller, name, parent_id)`
+pub fn emit_tag_created(
+    env: &Env,
+    tag_id: u64,
+    caller: &Address,
+    name: &Symbol,
+    parent_id: Option<u64>,
+) {
+    env.events().publish(
+        (Symbol::new(env, "tag_created"), tag_id),
+        (caller.clone(), name.clone(), parent_id),
+    );
+}
+
+/// Emit when a hierarchical tag is deleted.
+///
+/// Topics: `("tag_deleted", tag_id)`
+/// Data:   `caller`
+pub fn emit_tag_deleted(env: &Env, tag_id: u64, caller: &Address) {
+    env.events()
+        .publish((Symbol::new(env, "tag_deleted"), tag_id), caller.clone());
+}
+
+/// Emit when the tags on a proposal change (add, remove, bulk add, assign).
+///
+/// Topics: `("proposal_tags_changed", proposal_id)`
+/// Data:   `(caller, tag_count)` where `tag_count` is the resulting tag count.
+pub fn emit_proposal_tags_changed(env: &Env, proposal_id: u64, caller: &Address, tag_count: u32) {
+    env.events().publish(
+        (Symbol::new(env, "proposal_tags_changed"), proposal_id),
+        (caller.clone(), tag_count),
+    );
+}
+
+// ============================================================================
+// Issue #1735: Governance / Voting Config Change Event
+// ============================================================================
+
+/// Emit when a governance-critical configuration parameter is changed.
+///
+/// Topics: `("config_param_changed", param)`
+/// Data:   `admin`
+pub fn emit_config_param_changed(env: &Env, param: Symbol, admin: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "config_param_changed"), param),
+        admin.clone(),
+    );
+}
+
+// ============================================================================
+// Issue #1736: Variable Template CRUD Events
+// ============================================================================
+
+/// Emit when a variable-substitution template is created.
+///
+/// Topics: `("var_template_created", template_id)`
+/// Data:   `(name, creator)`
+pub fn emit_var_template_created(env: &Env, template_id: u64, name: &Symbol, creator: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "var_template_created"), template_id),
+        (name.clone(), creator.clone()),
+    );
+}
+
+/// Emit when a variable-substitution template is updated.
+///
+/// Topics: `("var_template_updated", template_id)`
+/// Data:   `(name, version, updater)`
+pub fn emit_var_template_updated(
+    env: &Env,
+    template_id: u64,
+    name: &Symbol,
+    version: u32,
+    updater: &Address,
+) {
+    env.events().publish(
+        (Symbol::new(env, "var_template_updated"), template_id),
+        (name.clone(), version, updater.clone()),
+    );
+}
+
+/// Emit when a variable-substitution template is deactivated.
+///
+/// Topics: `("var_template_deactivated", template_id)`
+/// Data:   `(name, admin)`
+pub fn emit_var_template_deactivated(env: &Env, template_id: u64, name: &Symbol, admin: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "var_template_deactivated"), template_id),
+        (name.clone(), admin.clone()),
+    );
+}
+
+// ============================================================================
+// Issue #1737: Vesting Events (moved from raw publish in lib.rs)
+// ============================================================================
+
+/// Emit when a vesting schedule is created.
+///
+/// Topics: `("vesting_created", schedule_id)`
+/// Data:   `(beneficiary, token, total, cliff_ledger, end_ledger)`
+pub fn emit_vesting_created(
+    env: &Env,
+    schedule_id: u64,
+    beneficiary: &Address,
+    token: &Address,
+    total: i128,
+    cliff_ledger: u32,
+    end_ledger: u32,
+) {
+    env.events().publish(
+        (Symbol::new(env, "vesting_created"), schedule_id),
+        (
+            beneficiary.clone(),
+            token.clone(),
+            total,
+            cliff_ledger,
+            end_ledger,
+        ),
+    );
+}
+
+/// Emit when vested tokens are claimed by the beneficiary.
+///
+/// Topics: `("vesting_claimed", schedule_id)`
+/// Data:   `(beneficiary, claimed_now, total_claimed)`
+pub fn emit_vesting_claimed(
+    env: &Env,
+    schedule_id: u64,
+    beneficiary: &Address,
+    claimed_now: i128,
+    total_claimed: i128,
+) {
+    env.events().publish(
+        (Symbol::new(env, "vesting_claimed"), schedule_id),
+        (beneficiary.clone(), claimed_now, total_claimed),
+    );
+}
+
+/// Emit when a vesting schedule is cancelled by an admin.
+///
+/// Topics: `("vesting_cancelled", schedule_id)`
+/// Data:   `(admin, vested_unclaimed_paid, unvested_returned)`
+pub fn emit_vesting_cancelled(
+    env: &Env,
+    schedule_id: u64,
+    admin: &Address,
+    vested_unclaimed_paid: i128,
+    unvested_returned: i128,
+) {
+    env.events().publish(
+        (Symbol::new(env, "vesting_cancelled"), schedule_id),
+        (admin.clone(), vested_unclaimed_paid, unvested_returned),
+    );
+}
+
+// ============================================================================
+// Multi-Phase Execution Events
+// ============================================================================
+
+/// Emit when a single phase of a multi-phase proposal execution completes.
+///
+/// Topics: `("phase_executed", proposal_id)`
+/// Data:   `(phase_index, executor, ledger)`
+// Phase Execution Events
+// ============================================================================
+
+/// Emit when a proposal phase executes successfully.
+///
+/// Topics: `("phase_executed", proposal_id)`
+/// Data:   `(phase_index, status, error_code)`
+pub fn emit_phase_executed(
+    env: &Env,
+    proposal_id: u64,
+    phase_index: u32,
+    executor: &Address,
+    ledger: u64,
+) {
+    env.events().publish(
+        (Symbol::new(env, "phase_executed"), proposal_id),
+        (phase_index, executor.clone(), ledger),
+    );
+}
+
+/// Emit when a phase of a multi-phase proposal execution fails.
+///
+/// Topics: `("phase_failed", proposal_id)`
+/// Data:   `(phase_index, executor, error_code)`
+    status: u32,
+    error_code: u32,
+) {
+    env.events().publish(
+        (Symbol::new(env, "phase_executed"), proposal_id),
+        (phase_index, status, error_code),
+    );
+}
+
+/// Emit when a proposal phase fails.
+///
+/// Topics: `("phase_failed", proposal_id)`
+/// Data:   `(phase_index, status, error_code)`
+pub fn emit_phase_failed(
+    env: &Env,
+    proposal_id: u64,
+    phase_index: u32,
+    executor: &Address,
+    status: u32,
+    error_code: u32,
+) {
+    env.events().publish(
+        (Symbol::new(env, "phase_failed"), proposal_id),
+        (phase_index, executor.clone(), error_code),
+        (phase_index, status, error_code),
+    );
+}
+
+// ============================================================================
+// Governed pool and fee withdrawals
+// ============================================================================
+
+/// Emit when a governed withdrawal proposal moves funds out of a vault pool.
+///
+/// Topics: `("pool_withdrawn", pool)` where pool is `ins_withdraw`, `stk_withdraw` or `fee_withdraw`
+/// Data:   `(proposal_id, token, recipient, amount, executor)`
+pub fn emit_pool_withdrawn(
+    env: &Env,
+    pool: &Symbol,
+    proposal_id: u64,
+    token: &Address,
+    recipient: &Address,
+    amount: i128,
+    executor: &Address,
+) {
+    env.events().publish(
+        (Symbol::new(env, "pool_withdrawn"), pool.clone()),
+        (
+            proposal_id,
+            token.clone(),
+            recipient.clone(),
+            amount,
+            executor.clone(),
+        ),
+    );
+}
+
+/// Emit whenever collected fees leave the vault (direct or governed).
+///
+/// Topics: `("fees_withdrawn",)`
+/// Data:   `(token, recipient, amount, admin)`
+pub fn emit_fees_withdrawn(
+    env: &Env,
+    token: &Address,
+    recipient: &Address,
+    amount: i128,
+    admin: &Address,
+) {
+    env.events().publish(
+        (Symbol::new(env, "fees_withdrawn"),),
+        (token.clone(), recipient.clone(), amount, admin.clone()),
     );
 }

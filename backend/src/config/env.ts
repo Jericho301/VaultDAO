@@ -1,4 +1,7 @@
-import { DEFAULT_SQLITE_POOL_SIZE } from "../shared/storage/sqlite-pool.js";
+import {
+  DEFAULT_SQLITE_POOL_SIZE,
+  isPrivateDatabase,
+} from "../shared/storage/sqlite-pool.js";
 
 export interface BackendEnv {
   readonly port: number;
@@ -62,10 +65,17 @@ export interface BackendEnv {
   readonly rateLimitProposalsPerMin: number;
   readonly rateLimitExecutePerMin: number;
   readonly rateLimitDefaultPerMin: number;
+  readonly trustProxy?: boolean | number | string;
   /** Maximum ledger jitter window for due-payment queries (default: 10 ledgers). */
   readonly jitterWindowMax: number;
   /** Maximum number of topic subscriptions a single WebSocket client may hold (default: 100). */
   readonly wsMaxSubscriptionsPerClient: number;
+  /** Close WebSocket connections that have not authenticated within this many ms (default: 10000). */
+  readonly wsAuthTimeoutMs: number;
+  /** Maximum concurrent WebSocket connections across all clients (default: 10000). */
+  readonly wsMaxConnections: number;
+  /** Maximum concurrent WebSocket connections from a single IP (default: 20). */
+  readonly wsMaxConnectionsPerIp: number;
   /** Enable the daily proposal archival job (default: true). */
   readonly proposalArchivalJobEnabled: boolean;
   /** Interval in ms between archival runs (default: 86400000 = 24 h). */
@@ -308,6 +318,9 @@ export function createTestEnv(overrides: Partial<BackendEnv> = {}): BackendEnv {
     rateLimitDefaultPerMin: 60,
     jitterWindowMax: 10,
     wsMaxSubscriptionsPerClient: 100,
+    wsAuthTimeoutMs: 10_000,
+    wsMaxConnections: 10_000,
+    wsMaxConnectionsPerIp: 20,
     proposalArchivalJobEnabled: false,
     proposalArchivalJobIntervalMs: 86_400_000,
     proposalArchivalThresholdDays: 180,
@@ -410,10 +423,30 @@ export function loadEnv(): BackendEnv {
     60,
     issues,
   );
+  const trustProxyRaw = readValue("TRUST_PROXY");
+  let trustProxy: boolean | number | string | undefined = undefined;
+  if (trustProxyRaw !== undefined) {
+    if (trustProxyRaw.toLowerCase() === "true") {
+      trustProxy = true;
+    } else if (trustProxyRaw.toLowerCase() === "false") {
+      trustProxy = false;
+    } else if (/^\d+$/.test(trustProxyRaw)) {
+      trustProxy = parseInt(trustProxyRaw, 10);
+    } else {
+      trustProxy = trustProxyRaw;
+    }
+  }
   const jitterWindowMax = readPort("JITTER_WINDOW_MAX", 10, issues);
   const wsMaxSubscriptionsPerClient = readPort(
     "WS_MAX_SUBSCRIPTIONS_PER_CLIENT",
     100,
+    issues,
+  );
+  const wsAuthTimeoutMs = readPort("WS_AUTH_TIMEOUT_MS", 10_000, issues);
+  const wsMaxConnections = readPort("WS_MAX_CONNECTIONS", 10_000, issues);
+  const wsMaxConnectionsPerIp = readPort(
+    "WS_MAX_CONNECTIONS_PER_IP",
+    20,
     issues,
   );
   const normalizerCacheMaxSize = readPort(
@@ -497,6 +530,12 @@ export function loadEnv(): BackendEnv {
     issues,
   );
 
+  if (nodeEnv === "production" && isPrivateDatabase(databasePath)) {
+    issues.push(
+      `DATABASE_PATH must point to a persistent SQLite file in production. Received "${databasePath}".`,
+    );
+  }
+
   if (nodeEnv === "production" && corsOrigin.length === 0) {
     issues.push("CORS_ORIGIN is required in production environment.");
   }
@@ -546,8 +585,12 @@ export function loadEnv(): BackendEnv {
     rateLimitProposalsPerMin,
     rateLimitExecutePerMin,
     rateLimitDefaultPerMin,
+    trustProxy,
     jitterWindowMax,
     wsMaxSubscriptionsPerClient,
+    wsAuthTimeoutMs,
+    wsMaxConnections,
+    wsMaxConnectionsPerIp,
     proposalArchivalJobEnabled,
     proposalArchivalJobIntervalMs,
     proposalArchivalThresholdDays,

@@ -79,6 +79,30 @@ for entry in history.iter() {
 }
 ```
 
+## Pause Semantics for Vote Entry Points
+
+The contract's pause mechanism applies consistently across all vote entry points:
+
+### Blocked While Paused
+
+The following functions are all blocked while the contract is paused, returning a `ContractPaused` error:
+
+- `approve_proposal`
+- `abstain_proposal`
+- `reject_proposal`
+- `change_vote`
+
+This ensures that no voting activity of any kind can occur during a pause, regardless of whether the vote originates from a direct signer or a delegated voter.
+
+### Not Pause-Gated (Recorded Decision)
+
+The following operations are intentionally **not** pause-gated:
+
+- **Delegation setup** (`delegate_voting_power`, `revoke_delegation`): Signers may continue to configure or revoke their delegations while the contract is paused. This allows signers to prepare for or unwind from a pause without being locked into a stale delegation configuration.
+- **`vote_as_delegate`**: This entry point is not pause-gated. It is treated as a delegation-management operation rather than a direct vote entry point.
+
+> **Decision record**: The asymmetry above is deliberate. Pausing halts *voting outcomes*, but delegation configuration remains available so that signers can adjust representation during a pause. Any future change to this behavior should be treated as a breaking change and documented here.
+
 ## Voting with Delegation
 
 ### Approve Proposal (Delegated)

@@ -305,6 +305,42 @@ export const ERROR_REGISTRY: Readonly<
     example:
       "Attempting to send 500 XLM when the vault only holds 100 XLM.",
   },
+  [VaultErrorCode.StreamNotActive]: {
+    code: VaultErrorCode.StreamNotActive,
+    name: "StreamNotActive",
+    category: "Streaming",
+    description:
+      "Streaming payment exists but is not in the Active state.",
+    example:
+      "Calling triggerStreamPayment() on a paused or cancelled stream.",
+  },
+  [VaultErrorCode.VestingNotFound]: {
+    code: VaultErrorCode.VestingNotFound,
+    name: "VestingNotFound",
+    category: "Token",
+    description:
+      "No vesting schedule exists with the given ID.",
+    example:
+      "Calling claimVestedTokens() with an unknown schedule ID.",
+  },
+  [VaultErrorCode.LockAlreadyActive]: {
+    code: VaultErrorCode.LockAlreadyActive,
+    name: "LockAlreadyActive",
+    category: "Token",
+    description:
+      "Owner already has an active token lock.",
+    example:
+      "Calling lockTokens() while a previous lock is still active.",
+  },
+  [VaultErrorCode.VestingCapReached]: {
+    code: VaultErrorCode.VestingCapReached,
+    name: "VestingCapReached",
+    category: "Token",
+    description:
+      "The cap on active vesting schedules has been reached.",
+    example:
+      "Creating a 101st active vesting schedule.",
+  },
 } as const;
 
 // ---------------------------------------------------------------------------

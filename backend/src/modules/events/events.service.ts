@@ -33,6 +33,8 @@ const PROPOSAL_TOPICS = new Set([
   "proposal_rejected",
   "proposal_deadline_rejected",
   "proposal_vetoed",
+  "recipient_list_changed",
+  "recipient_list_bulk_changed",
   "proposal_amended",
   "proposal_from_template",
   "scheduled_proposal_cancelled",
