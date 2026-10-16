@@ -94,16 +94,28 @@ mod tests {
         let initial_backoff = config.retry_config.initial_backoff_ledgers;
 
         // First retry: 2^0 = 1x
-        let backoff_1 = initial_backoff.checked_shl(0).unwrap();
+        let backoff_1 = crate::retry::compute_backoff(initial_backoff, 0);
         assert_eq!(backoff_1, initial_backoff);
 
         // Second retry: 2^1 = 2x
-        let backoff_2 = initial_backoff.checked_shl(1).unwrap();
+        let backoff_2 = crate::retry::compute_backoff(initial_backoff, 1);
         assert_eq!(backoff_2, initial_backoff * 2);
 
         // Third retry: 2^2 = 4x
-        let backoff_3 = initial_backoff.checked_shl(2).unwrap();
+        let backoff_3 = crate::retry::compute_backoff(initial_backoff, 2);
         assert_eq!(backoff_3, initial_backoff * 4);
+    }
+
+    #[test]
+    fn test_retry_backoff_near_zero_wrap() {
+        // A large shift count must not wrap around to a tiny value; the
+        // overflow-safe helper saturates instead.
+        let initial_backoff: u64 = 10;
+        let huge = crate::retry::compute_backoff(initial_backoff, 63);
+        assert!(huge >= initial_backoff);
+        // Saturation must never produce a value smaller than the base backoff.
+        let wrapped = crate::retry::compute_backoff(initial_backoff, 64);
+        assert!(wrapped >= initial_backoff);
     }
 
     #[test]
@@ -150,15 +162,15 @@ mod tests {
         let initial_backoff = config.retry_config.initial_backoff_ledgers;
 
         // First retry: 2^0 = 1x
-        let backoff_1 = initial_backoff.checked_shl(0).unwrap();
+        let backoff_1 = crate::retry::compute_backoff(initial_backoff, 0);
         assert_eq!(backoff_1, initial_backoff);
 
         // Second retry: 2^1 = 2x
-        let backoff_2 = initial_backoff.checked_shl(1).unwrap();
+        let backoff_2 = crate::retry::compute_backoff(initial_backoff, 1);
         assert_eq!(backoff_2, initial_backoff * 2);
 
         // Third retry: 2^2 = 4x
-        let backoff_3 = initial_backoff.checked_shl(2).unwrap();
+        let backoff_3 = crate::retry::compute_backoff(initial_backoff, 2);
         assert_eq!(backoff_3, initial_backoff * 4);
     }
 
@@ -276,20 +288,14 @@ mod tests {
 
         // Verify: next = current + initial * 2^(retry_count - 1)
         // retry_count=1: 10 * 2^0 = 10
-        assert_eq!(initial.checked_shl(0).unwrap(), 10);
+        assert_eq!(crate::retry::compute_backoff(initial, 0), 10);
         // retry_count=2: 10 * 2^1 = 20
-        assert_eq!(initial.checked_shl(1).unwrap(), 20);
+        assert_eq!(crate::retry::compute_backoff(initial, 1), 20);
         // retry_count=3: 10 * 2^2 = 40
-        assert_eq!(initial.checked_shl(2).unwrap(), 40);
+        assert_eq!(crate::retry::compute_backoff(initial, 2), 40);
         // Capped at 7 days = 120,960 ledgers
         let max_backoff: u64 = 17_280 * 7;
-        assert!(
-            initial
-                .checked_shl(30)
-                .unwrap_or(max_backoff)
-                .min(max_backoff)
-                <= max_backoff
-        );
+        assert!(crate::retry::compute_backoff(initial, 30).min(max_backoff) <= max_backoff);
     }
 
     // ========================================================================

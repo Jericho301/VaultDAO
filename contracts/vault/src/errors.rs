@@ -514,6 +514,10 @@ pub enum VaultError {
     SchemaVersionMismatch = 1140,
 
     // =========================================================
+    // Retry configuration validation
+    // =========================================================
+    /// Retry configuration is invalid (e.g. `initial_backoff_ledgers` is zero)
+    RetryConfigInvalid = 1141,
     // Issue #1750: change_vote deadline distinction
     // =========================================================
     /// Voting window for the proposal has already closed

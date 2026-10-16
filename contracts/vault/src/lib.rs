@@ -350,6 +350,10 @@ impl VaultDAO {
             return Err(VaultError::InvalidVetoConfig);
         }
 
+        // Validate retry configuration at set time so a zero backoff or an
+        // out-of-range backoff cannot be persisted.
+        Self::validate_retry_config(&config.retry_config)?;
+
         // Admin must authorize initialization
         admin.require_auth();
 
@@ -5700,11 +5704,27 @@ impl VaultDAO {
         Ok(proposal_id)
     }
 
+    /// Validate a retry configuration.
+    ///
+    /// Rejects a zero `initial_backoff_ledgers` (which would make every retry
+    /// immediate) and any backoff above `MAX_RETRY_BACKOFF_LEDGERS`. Applied
+    /// both at `initialize` and whenever a config change is proposed, so an
+    /// invalid retry config can never be persisted.
+    fn validate_retry_config(retry_config: &RetryConfig) -> Result<(), VaultError> {
+        if retry_config.initial_backoff_ledgers == 0
+            || retry_config.initial_backoff_ledgers > MAX_RETRY_BACKOFF_LEDGERS
+        {
+            return Err(VaultError::InvalidAmount);
+        }
+        Ok(())
+    }
+
     /// Validate a Config struct using the same rules as initialize.
     fn validate_config(config: &Config) -> Result<(), VaultError> {
         if config.signers.is_empty() {
             return Err(VaultError::NoSigners);
         }
+        Self::validate_retry_config(&config.retry_config)?;
         // Issue #1693: enforce the same minimum of 2 as initialize (Issue #1523).
         if config.threshold < 2 {
             return Err(VaultError::ThresholdTooLow);
@@ -13523,6 +13543,10 @@ impl VaultDAO {
         current_ledger: u64,
         err: &VaultError,
     ) -> Result<(), VaultError> {
+        // Defensive: the config is validated at set time, but never trust a
+        // zero backoff here — it would turn retries into a tight loop.
+        Self::validate_retry_config(retry_config)?;
+
         let mut retry_state = storage::get_retry_state(env, proposal_id).unwrap_or(RetryState {
             retry_count: 0,
             next_retry_ledger: 0,

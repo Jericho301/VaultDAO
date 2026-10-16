@@ -529,6 +529,46 @@ fn test_execute_recurring_payment_three_missed_exceeding_cap() {
 }
 
 // ============================================================================
+// Retry config validation
+// ============================================================================
+
+#[test]
+fn test_set_retry_config_rejects_zero_initial_backoff() {
+    let env = Env::default();
+    let (client, admin, _, _) = setup(&env);
+
+    let result = client.try_set_retry_config(
+        &admin,
+        &RetryConfig {
+            max_retry_delay: 100,
+            enabled: true,
+            max_retries: 3,
+            initial_backoff_ledgers: 0,
+        },
+    );
+
+    assert_eq!(result.err(), Some(Ok(VaultError::InvalidRetryConfig)));
+}
+
+#[test]
+fn test_set_retry_config_rejects_initial_backoff_above_cap() {
+    let env = Env::default();
+    let (client, admin, _, _) = setup(&env);
+
+    let result = client.try_set_retry_config(
+        &admin,
+        &RetryConfig {
+            max_retry_delay: 100,
+            enabled: true,
+            max_retries: 3,
+            initial_backoff_ledgers: u32::MAX,
+        },
+    );
+
+    assert_eq!(result.err(), Some(Ok(VaultError::InvalidRetryConfig)));
+}
+
+// ============================================================================
 // Issue #942: Recurring Payment Pause and Resume
 // ============================================================================
 
