@@ -136,3 +136,121 @@ fn test_execute_succeeds_for_allowed_recipient() {
     assert_eq!(TokenClient::new(&env, &token).balance(&recipient), 100);
     assert_eq!(client.get_proposal(&pid).status, ProposalStatus::Executed);
 }
+
+/// Returns (client, admin, token, recipient, approved proposal id) for a
+/// multi-phase proposal whose first phase has already been executed.
+fn setup_approved_multi_phase_proposal(
+    env: &Env,
+) -> (VaultDAOClient<'static>, Address, Address, Address, u64) {
+    let contract_id = env.register(VaultDAO, ());
+    let client = VaultDAOClient::new(env, &contract_id);
+
+    let admin = Address::generate(env);
+    let signer2 = Address::generate(env);
+    let recipient = Address::generate(env);
+
+    let mut signers = Vec::new(env);
+    signers.push_back(admin.clone());
+    signers.push_back(signer2.clone());
+
+    let token = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+    StellarAssetClient::new(env, &token).mint(&contract_id, &10_000);
+
+    client.initialize(&admin, &make_config(env, signers));
+    client.set_role(&admin, &signer2, &Role::Treasurer);
+
+    let mut phases = Vec::new(env);
+    phases.push_back(crate::types::ProposalPhase {
+        recipient: recipient.clone(),
+        token: token.clone(),
+        amount: 100,
+        memo: Symbol::new(env, "phase1"),
+        priority: Priority::Normal,
+    });
+    phases.push_back(crate::types::ProposalPhase {
+        recipient: recipient.clone(),
+        token: token.clone(),
+        amount: 100,
+        memo: Symbol::new(env, "phase2"),
+        priority: Priority::Normal,
+    });
+
+    let pid = client.propose_multi_phase_transfer(
+        &admin,
+        &phases,
+        &Vec::new(env),
+        &ConditionLogic::And,
+        &0i128,
+    );
+    client.approve_proposal(&admin, &pid);
+    client.approve_proposal(&signer2, &pid);
+    assert_eq!(client.get_proposal(&pid).status, ProposalStatus::Approved);
+
+    // Execute the first phase so the proposal is mid-flight.
+    client.execute_proposal(&admin, &pid);
+    assert_eq!(TokenClient::new(env, &token).balance(&recipient), 100);
+
+    (client, admin, token, recipient, pid)
+}
+
+#[test]
+fn test_multi_phase_execute_fails_when_recipient_blacklisted_after_first_phase() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, token, recipient, pid) = setup_approved_multi_phase_proposal(&env);
+
+    client.set_list_mode(&admin, &ListMode::Blacklist);
+    client.add_to_blacklist(&admin, &recipient);
+
+    let result = client.try_execute_proposal(&admin, &pid);
+    assert_eq!(result, Err(Ok(VaultError::RecipientBlacklisted)));
+    // Only the first phase's transfer should have gone through.
+    assert_eq!(TokenClient::new(&env, &token).balance(&recipient), 100);
+}
+
+#[test]
+fn test_multi_phase_batch_execute_skips_recipient_blacklisted_after_first_phase() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, token, recipient, pid) = setup_approved_multi_phase_proposal(&env);
+
+    client.set_list_mode(&admin, &ListMode::Blacklist);
+    client.add_to_blacklist(&admin, &recipient);
+
+    let mut ids = Vec::new(&env);
+    ids.push_back(pid);
+    let (executed, failed) = client.batch_execute_proposals(&admin, &ids);
+
+    assert_eq!(executed.len(), 0);
+    assert_eq!(failed, 1);
+    assert_eq!(TokenClient::new(&env, &token).balance(&recipient), 100);
+}
+
+#[test]
+fn test_multi_phase_execute_succeeds_for_allowed_recipient() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, token, recipient, pid) = setup_approved_multi_phase_proposal(&env);
+
+    client.set_list_mode(&admin, &ListMode::Blacklist);
+    client.execute_proposal(&admin, &pid);
+
+    assert_eq!(TokenClient::new(&env, &token).balance(&recipient), 200);
+    assert_eq!(client.get_proposal(&pid).status, ProposalStatus::Executed);
+}
+
+#[test]
+fn test_multi_phase_execute_fails_when_spending_limit_exceeded_after_first_phase() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, token, recipient, pid) = setup_approved_multi_phase_proposal(&env);
+
+    // Tighten the per-proposal spending limit below the remaining phase amount.
+    client.set_spending_limit(&admin, &150);
+
+    let result = client.try_execute_proposal(&admin, &pid);
+    assert_eq!(result, Err(Ok(VaultError::ExceedsSpendingLimit)));
+    assert_eq!(TokenClient::new(&env, &token).balance(&recipient), 100);
+}

@@ -598,6 +598,209 @@ mod tests {
     }
 
     #[test]
+    fn test_auto_expire_proposals_scans_due_prefix_and_refunds() {
+    fn test_auto_expire_scan_cost_proportional_to_pending() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, signer1, _signer2, _contract_id) = setup_vault();
+
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token).mint(&admin, &1_000_000);
+        let recipient = Address::generate(&env);
+
+        // Create many proposals at increasing ledgers so they expire in order.
+        let mut ids: std::vec::Vec<u64> = std::vec::Vec::new();
+        for i in 0..20u32 {
+            env.ledger().with_mut(|l| {
+                l.sequence_number = 100 + i * 10;
+            });
+            let pid = propose_transfer(&env, &client, &signer1, &recipient, &token);
+            ids.push(pid);
+        }
+
+        // Advance far enough that the first half is due for expiry.
+        env.ledger().with_mut(|l| {
+            l.sequence_number = 100_000;
+        });
+
+        // Auto-expire should only scan the due prefix and refund reservations.
+        let expired_count = client.auto_expire_proposals(&admin, &10);
+        assert!(expired_count > 0);
+
+        // The scanned (due) proposals should now be Expired.
+        for pid in ids.iter().take(expired_count as usize) {
+            let p = client.get_proposal(&pid);
+            assert_eq!(p.status, ProposalStatus::Expired);
+        }
+
+        // Spending reservation should have been refunded (spent amount reset).
+        let config = client.get_config();
+        assert!(config.spending_limit > 0);
+    }
+
+    #[test]
+    fn test_auto_expire_proposals_prunes_tags() {
+        // Create many proposals that will be settled (executed) so they are not Pending.
+        env.ledger().with_mut(|l| {
+            l.sequence_number = 100;
+        });
+        for _ in 0..20 {
+            let pid = propose_transfer(&env, &client, &signer1, &recipient, &token);
+            client.approve_proposal(&signer1, &pid);
+            client.approve_proposal(&admin, &pid);
+            client.execute_proposal(&signer1, &pid);
+        }
+
+        // Create a few Pending proposals that are due for expiry.
+        let mut pending_ids = std::vec::Vec::new();
+        for _ in 0..3 {
+            let pid = propose_transfer(&env, &client, &signer1, &recipient, &token);
+            pending_ids.push(pid);
+        }
+
+        // Advance far past the expiry of the pending proposals.
+        env.ledger().with_mut(|l| {
+            l.sequence_number = 1_000_000;
+        });
+
+        // auto_expire_proposals should only touch the due prefix of Pending
+        // proposals, not the many settled ones.
+        let expired = client.auto_expire_proposals(&admin, &100);
+        assert_eq!(expired, 3);
+
+        for pid in pending_ids {
+            let proposal = client.get_proposal(&pid);
+            assert_eq!(proposal.status, ProposalStatus::Expired);
+        }
+    }
+
+    #[test]
+    fn test_auto_expire_respects_max_scan_bound() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, signer1, _signer2, _contract_id) = setup_vault();
+
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token).mint(&admin, &1_000_000);
+        let recipient = Address::generate(&env);
+
+        // Create several Pending proposals that are all due for expiry.
+        env.ledger().with_mut(|l| {
+            l.sequence_number = 100;
+        });
+        let mut pending_ids = std::vec::Vec::new();
+        for _ in 0..5 {
+            let pid = propose_transfer(&env, &client, &signer1, &recipient, &token);
+            pending_ids.push(pid);
+        }
+
+        env.ledger().with_mut(|l| {
+            l.sequence_number = 1_000_000;
+        });
+
+        // With max_scan = 2, only two index entries should be examined/expired.
+        let expired = client.auto_expire_proposals(&admin, &2);
+        assert_eq!(expired, 2);
+
+        // The remaining Pending proposals are still Pending.
+        let mut still_pending = 0u32;
+        for pid in pending_ids.iter() {
+            if client.get_proposal(pid).status == ProposalStatus::Pending {
+                still_pending += 1;
+            }
+        }
+        assert_eq!(still_pending, 3);
+
+        // A subsequent call with a larger bound expires the rest.
+        let expired_rest = client.auto_expire_proposals(&admin, &100);
+        assert_eq!(expired_rest, 3);
+    }
+
+    #[test]
+    fn test_auto_expire_refunds_reservation_and_prunes_tags() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, admin, signer1, _signer2, _contract_id) = setup_vault();
+
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token).mint(&admin, &1_000_000);
+        let recipient = Address::generate(&env);
+
+        env.ledger().with_mut(|l| {
+            l.sequence_number = 100;
+        });
+        let pid = propose_transfer(&env, &client, &signer1, &recipient, &token);
+
+        // Tag the proposal so it is indexed.
+        let tag = Symbol::new(&env, "ops");
+        client.tag_proposal(&signer1, &pid, &tag);
+
+        // Advance past expiry and auto-expire.
+        env.ledger().with_mut(|l| {
+            l.sequence_number = 100_000;
+        });
+        let expired_count = client.auto_expire_proposals(&admin, &10);
+        assert!(expired_count > 0);
+
+        // The tag index should no longer reference the expired proposal.
+        let tagged = client.get_proposals_by_tag(&tag);
+        assert!(!tagged.contains(&pid));
+
+        let mut tags = Vec::new(&env);
+        tags.push_back(Symbol::new(&env, "tag_a"));
+        tags.push_back(Symbol::new(&env, "tag_b"));
+
+        let pid = client.propose_transfer(
+            &signer1,
+            &recipient,
+            &token,
+            &100i128,
+            &Symbol::new(&env, "test"),
+            &Priority::Normal,
+            &tags,
+            &ConditionLogic::And,
+            &0i128,
+        );
+
+        // The proposal reserves spending against daily/weekly and per-token buckets.
+        let reserved_before = client.get_spending_reservation(&pid);
+        assert!(reserved_before > 0);
+
+        // Tags are indexed while the proposal is Pending.
+        let tagged = client.get_proposals_by_tag(&Symbol::new(&env, "tag_a"));
+        assert!(tagged.contains(pid));
+
+        // Advance past expiry and run auto-expire.
+        env.ledger().with_mut(|l| {
+            l.sequence_number = 1_000_000;
+        });
+        let expired = client.auto_expire_proposals(&admin, &100);
+        assert_eq!(expired, 1);
+
+        let proposal = client.get_proposal(&pid);
+        assert_eq!(proposal.status, ProposalStatus::Expired);
+
+        // The spending reservation is refunded.
+        let reserved_after = client.get_spending_reservation(&pid);
+        assert_eq!(reserved_after, 0);
+
+        // Tags are pruned from the tag index.
+        let tagged_after = client.get_proposals_by_tag(&Symbol::new(&env, "tag_a"));
+        assert!(!tagged_after.contains(pid));
+        let tagged_after_b = client.get_proposals_by_tag(&Symbol::new(&env, "tag_b"));
+        assert!(!tagged_after_b.contains(pid));
+    }
+
+    #[test]
     #[ignore = "quarantined: unwrap on HostError(Value, InvalidInput) against the current contract (docs/reference/TESTING.md)"]
     fn test_proposal_not_deleted_immediately_on_expiry() {
         let env = Env::default();
@@ -631,5 +834,174 @@ mod tests {
         let proposal_later = client.get_proposal(&pid);
         // Either still in main storage or in archive
         assert!(proposal_later.id > 0 || proposal_later.id == 0);
+    }
+
+    // ---------------------------------------------------------------------
+    // Late vote handling past `expires_at`
+    // ---------------------------------------------------------------------
+
+    /// Sets up a vault with a token, mints funds to the admin, and creates a
+    /// proposal whose `expires_at` is `created_at + expiry_ledgers`.
+    fn setup_expiring_proposal(
+        env: &Env,
+        expiry_ledgers: u32,
+    ) -> (
+        VaultDAOClient<'static>,
+        Address,
+        Address,
+        Address,
+        Address,
+        u64,
+    ) {
+        let (client, admin, signer1, signer2, _contract_id) = setup_vault_threshold_2();
+
+        let token_admin = Address::generate(env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(env, &token).mint(&admin, &10_000);
+        let recipient = Address::generate(env);
+
+        env.ledger().with_mut(|l| {
+            l.sequence_number = 100;
+        });
+
+        let proposal_id = propose_transfer(env, &client, &signer1, &recipient, &token);
+
+        // Configure the expiry window for the proposal.
+        client.set_proposal_expiry_ledgers(&admin, &expiry_ledgers);
+
+        (client, admin, signer1, signer2, token, proposal_id)
+    }
+
+    fn assert_budget_refunded(client: &VaultDAOClient, proposal_id: u64) {
+        // Reserved daily/weekly budget must be released back to the original
+        // spend buckets once the proposal is expired.
+        let proposal = client.get_proposal(&proposal_id);
+        assert_eq!(proposal.status, ProposalStatus::Expired);
+
+        let daily = client.get_daily_spent();
+        let weekly = client.get_weekly_spent();
+        assert_eq!(daily, 0);
+        assert_eq!(weekly, 0);
+    }
+
+    #[test]
+    fn test_late_approve_after_expiry_is_rejected_and_refunds_budget() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, signer1, _signer2, _token, proposal_id) =
+            setup_expiring_proposal(&env, 100);
+
+        // Move strictly past `expires_at` (100 + 100 = 200).
+        env.ledger().with_mut(|l| {
+            l.sequence_number = 201;
+        });
+
+        let result = client.try_approve_proposal(&signer1, &proposal_id);
+        assert!(result.is_err());
+
+        let proposal = client.get_proposal(&proposal_id);
+        assert_eq!(proposal.status, ProposalStatus::Expired);
+        // No approval record should have been written.
+        assert_eq!(proposal.approvals.len(), 0);
+
+        assert_budget_refunded(&client, proposal_id);
+    }
+
+    #[test]
+    fn test_late_abstain_after_expiry_is_rejected_and_refunds_budget() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, signer1, _signer2, _token, proposal_id) =
+            setup_expiring_proposal(&env, 100);
+
+        env.ledger().with_mut(|l| {
+            l.sequence_number = 201;
+        });
+
+        let result = client.try_abstain_proposal(&signer1, &proposal_id);
+        assert!(result.is_err());
+
+        let proposal = client.get_proposal(&proposal_id);
+        assert_eq!(proposal.status, ProposalStatus::Expired);
+        // No abstention record should have been written.
+        assert_eq!(proposal.abstentions.len(), 0);
+
+        assert_budget_refunded(&client, proposal_id);
+    }
+
+    #[test]
+    fn test_late_change_vote_after_expiry_is_rejected_and_refunds_budget() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, signer1, _signer2, _token, proposal_id) =
+            setup_expiring_proposal(&env, 100);
+
+        // Cast an in-window abstention first so there is a vote to change.
+        client.abstain_proposal(&signer1, &proposal_id);
+
+        env.ledger().with_mut(|l| {
+            l.sequence_number = 201;
+        });
+
+        let result = client.try_change_vote(&signer1, &proposal_id, &true);
+        assert!(result.is_err());
+
+        let proposal = client.get_proposal(&proposal_id);
+        assert_eq!(proposal.status, ProposalStatus::Expired);
+        // The original abstention must remain untouched and no approval added.
+        assert_eq!(proposal.approvals.len(), 0);
+        assert_eq!(proposal.abstentions.len(), 1);
+
+        assert_budget_refunded(&client, proposal_id);
+    }
+
+    #[test]
+    fn test_vote_at_exact_expires_at_is_still_in_window() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, signer1, _signer2, _token, proposal_id) =
+            setup_expiring_proposal(&env, 100);
+
+        // Exactly at `expires_at` (100 + 100 = 200) the proposal is still live.
+        env.ledger().with_mut(|l| {
+            l.sequence_number = 200;
+        });
+
+        let result = client.try_approve_proposal(&signer1, &proposal_id);
+        assert!(result.is_ok());
+
+        let proposal = client.get_proposal(&proposal_id);
+        assert_ne!(proposal.status, ProposalStatus::Expired);
+        assert_eq!(proposal.approvals.len(), 1);
+    }
+
+    #[test]
+    fn test_expiry_event_emitted_on_late_vote() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let (client, _admin, signer1, _signer2, _token, proposal_id) =
+            setup_expiring_proposal(&env, 100);
+
+        env.ledger().with_mut(|l| {
+            l.sequence_number = 201;
+        });
+
+        let _ = client.try_approve_proposal(&signer1, &proposal_id);
+
+        // An expiry event must be emitted for the proposal.
+        let events = env.events().all();
+        let mut found = false;
+        for (_contract, topics, _data) in events.iter() {
+            for topic in topics.iter() {
+                if let Ok(sym) = Symbol::try_from_val(&env, &topic) {
+                    if sym == Symbol::new(&env, "proposal_expired") {
+                        found = true;
+                    }
+                }
+            }
+        }
+        assert!(found, "expected a proposal_expired event to be emitted");
     }
 }

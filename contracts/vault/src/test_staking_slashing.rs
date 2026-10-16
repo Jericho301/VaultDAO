@@ -3,6 +3,9 @@
 //! 0% on execution, `slash_percentage` on rejection, `cancellation_slash_percentage`
 //! on cancellation. Without the cancellation tier a proposer could spam proposals
 //! and withdraw them for free.
+//!
+//! Rejection is now threshold-based: a single signer can no longer reject a
+//! proposal, and rejection votes are gated by the pause mechanism.
 #![cfg(test)]
 
 use super::*;
@@ -174,8 +177,10 @@ fn test_rejection_slashes_ten_percent() {
 
     let before = balance(&env, &token, &proposer);
 
-    // Admin cancelling someone else's proposal takes the rejection path.
-    client.cancel_proposal(&admin, &id, &Symbol::new(&env, "bad"));
+    // Rejection now requires reaching the rejection threshold: a single
+    // signer's vote is not enough, so both signers must vote to reject.
+    client.vote_reject(&admin, &id, &Symbol::new(&env, "bad"));
+    client.vote_reject(&proposer, &id, &Symbol::new(&env, "bad"));
 
     assert_eq!(client.get_stake_pool_balance(&token), 10);
     assert_eq!(
@@ -191,7 +196,8 @@ fn test_rejection_slash_is_recorded_on_the_stake_record() {
     let (client, admin, proposer, token, cid) = setup(&env, staking_config(10, 50, false));
     let (id, _stake) = staked_proposal(&env, &client, &proposer, &token, &cid, 1_000);
 
-    client.cancel_proposal(&admin, &id, &Symbol::new(&env, "bad"));
+    client.vote_reject(&admin, &id, &Symbol::new(&env, "bad"));
+    client.vote_reject(&proposer, &id, &Symbol::new(&env, "bad"));
 
     let record = client.get_stake_record(&id).unwrap();
     assert!(record.slashed);
@@ -234,7 +240,8 @@ fn test_cancellation_costs_more_than_rejection() {
     let (rejected, _) = staked_proposal(&env, &client, &proposer, &token, &cid, 1_000);
     let (cancelled, _) = staked_proposal(&env, &client, &proposer, &token, &cid, 1_000);
 
-    client.cancel_proposal(&admin, &rejected, &Symbol::new(&env, "bad"));
+    client.vote_reject(&admin, &rejected, &Symbol::new(&env, "bad"));
+    client.vote_reject(&proposer, &rejected, &Symbol::new(&env, "bad"));
     let after_rejection = client.get_stake_pool_balance(&token);
 
     client.cancel_proposal(&proposer, &cancelled, &Symbol::new(&env, "withdrawn"));
@@ -244,6 +251,38 @@ fn test_cancellation_costs_more_than_rejection() {
         cancellation_slash > after_rejection,
         "spamming and withdrawing must not be the cheap option"
     );
+}
+
+// ============================================================================
+// Rejection threshold and pause gating
+// ============================================================================
+
+#[test]
+fn test_single_rejection_vote_does_not_slash() {
+    let env = Env::default();
+    let (client, admin, proposer, token, cid) = setup(&env, staking_config(10, 50, false));
+    let (id, _stake) = staked_proposal(&env, &client, &proposer, &token, &cid, 1_000);
+
+    // One vote is below the rejection threshold: nothing is slashed yet.
+    client.vote_reject(&admin, &id, &Symbol::new(&env, "bad"));
+
+    assert_eq!(client.get_stake_pool_balance(&token), 0);
+    let record = client.get_stake_record(&id).unwrap();
+    assert!(!record.slashed);
+}
+
+#[test]
+fn test_rejection_vote_blocked_while_paused() {
+    let env = Env::default();
+    let (client, admin, proposer, token, cid) = setup(&env, staking_config(10, 50, false));
+    let (id, _stake) = staked_proposal(&env, &client, &proposer, &token, &cid, 1_000);
+
+    client.pause(&admin);
+
+    let result = client.try_vote_reject(&admin, &id, &Symbol::new(&env, "bad"));
+    assert!(result.is_err(), "rejection votes must be blocked while paused");
+
+    assert_eq!(client.get_stake_pool_balance(&token), 0);
 }
 
 // ============================================================================

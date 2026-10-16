@@ -17,6 +17,11 @@ pub(crate) const QUIET_HOURS_CYCLE: u64 = 17280;
 /// Maximum proposals that can be batch-executed in one call (gas limit)
 pub(crate) const MAX_BATCH_SIZE: u32 = 10;
 
+/// Per-proposer pending reservation cap, as a fraction of the daily limit
+/// (basis points). A single proposer may not reserve more than this share of
+/// the daily outflow limit with pending proposals.
+pub(crate) const MAX_PROPOSER_PENDING_BPS: u32 = 5000;
+
 /// Maximum metadata entries stored per proposal
 pub(crate) const MAX_METADATA_ENTRIES: u32 = 16;
 

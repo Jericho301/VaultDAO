@@ -180,6 +180,12 @@ pub enum VaultError {
     /// Multi-phase proposal not found
     MultiPhaseProposalNotFound = 622,
 
+    /// A phase's amount is invalid (zero, or exceeds the phase/proposal limit)
+    PhaseAmountInvalid = 623,
+
+    /// A phase's recipient is not permitted (not whitelisted or blacklisted)
+    PhaseRecipientNotAllowed = 624,
+
     // =========================================================
     // Issue #1097: Capability Tokens
     // =========================================================
@@ -506,6 +512,31 @@ pub enum VaultError {
     // Issue #1748: Storage schema versioning
     /// Stored schema version does not match this contract build; call `migrate`
     SchemaVersionMismatch = 1140,
+
+    // =========================================================
+    // Retry configuration validation
+    // =========================================================
+    /// Retry configuration is invalid (e.g. `initial_backoff_ledgers` is zero)
+    RetryConfigInvalid = 1141,
+    // Issue #1750: change_vote deadline distinction
+    // =========================================================
+    /// Voting window for the proposal has already closed
+    VotingClosed = 1141,
+    // Dead-letter queue capacity
+    /// Dead-letter queue has reached its maximum capacity
+    DeadLetterQueueFull = 1141,
+
+    // =========================================================
+    // Rejection voting
+    // =========================================================
+    /// A reject vote was recorded but the rejection threshold has not been met
+    RejectionThresholdNotReached = 1141,
+    /// Signer has already rejected this proposal
+    AlreadyRejected = 1142,
+    // Per-proposer pending reservation cap
+    // =========================================================
+    /// A single proposer's pending reservations would exceed the per-proposer cap
+    ExceedsProposerPendingLimit = 1141,
 }
 
 // Compatibility markers for CI source checks:

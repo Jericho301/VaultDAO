@@ -1173,3 +1173,240 @@ fn setup_dependency_env(env: &Env) -> (VaultDAOClient<'_>, Address, Address, Add
     let recipient = Address::generate(env);
     (client, admin, token, recipient)
 }
+
+// ============================================================================
+// Phase execution failure regression tests
+// ============================================================================
+
+fn setup_phase_env(
+    env: &Env,
+) -> (VaultDAOClient<'_>, Address, Address, Address, Address) {
+    env.mock_all_auths();
+    let contract_id = env.register(VaultDAO, ());
+    let client = VaultDAOClient::new(env, &contract_id);
+
+    let admin = Address::generate(env);
+    let signer = Address::generate(env);
+    let recipient = Address::generate(env);
+
+    let mut signers = Vec::new(env);
+    signers.push_back(admin.clone());
+    signers.push_back(signer.clone());
+
+    let token = env
+        .register_stellar_asset_contract_v2(admin.clone())
+        .address();
+    StellarAssetClient::new(env, &token).mint(&contract_id, &100_000);
+
+    client.initialize(
+        &admin,
+        &init_config(env, signers, 2, ThresholdStrategy::Fixed),
+    );
+    client.set_role(&admin, &signer, &Role::Treasurer);
+
+    (client, admin, signer, token, recipient)
+}
+
+fn phase_statuses(client: &VaultDAOClient<'_>, proposal_id: u64) -> Vec<PhaseStatus> {
+    client.get_phase_statuses(&proposal_id)
+}
+
+fn assert_phase_status(
+    client: &VaultDAOClient<'_>,
+    proposal_id: u64,
+    index: u32,
+    expected: PhaseStatus,
+) {
+    let statuses = phase_statuses(client, proposal_id);
+    assert_eq!(statuses.get(index).unwrap(), expected);
+}
+
+fn count_phase_events(env: &Env, contract_id: &Address, topic: &str) -> u32 {
+    let mut count = 0u32;
+    for event in env.events().all().iter() {
+        let (addr, topics, _data) = event;
+        if &addr != contract_id {
+            continue;
+        }
+        if topics.len() == 0 {
+            continue;
+        }
+        let first: Symbol = topics.get(0).unwrap();
+        if first == Symbol::new(env, topic) {
+            count += 1;
+        }
+    }
+    count
+}
+
+/// Happy path: every phase executes successfully and the outcome is Completed.
+#[test]
+fn test_phase_execution_happy_path_completes() {
+    let env = Env::default();
+    let (client, admin, signer, token, recipient) = setup_phase_env(&env);
+
+    let proposal_id = client.propose_transfer(
+        &signer,
+        &recipient,
+        &token,
+        &100,
+        &Symbol::new(&env, "phases"),
+        &Priority::Normal,
+        &Vec::new(&env),
+        &ConditionLogic::And,
+        &0i128,
+    );
+
+    client.approve_proposal(&admin, &proposal_id);
+    client.approve_proposal(&signer, &proposal_id);
+
+    let outcome = client.execute_proposal(&signer, &proposal_id);
+    assert_eq!(outcome, PhaseExecutionOutcome::Completed);
+
+    let statuses = phase_statuses(&client, proposal_id);
+    assert!(statuses.len() > 0);
+    for i in 0..statuses.len() {
+        assert_eq!(statuses.get(i).unwrap(), PhaseStatus::Executed);
+    }
+
+    assert_eq!(
+        client.get_proposal(&proposal_id).status,
+        ProposalStatus::Executed
+    );
+}
+
+/// First-phase failure: the very first phase fails, so no later phase runs.
+#[test]
+fn test_first_phase_failure_marks_rejected() {
+    let env = Env::default();
+    let (client, admin, signer, token, recipient) = setup_phase_env(&env);
+
+    let proposal_id = client.propose_transfer(
+        &signer,
+        &recipient,
+        &token,
+        &100,
+        &Symbol::new(&env, "phases"),
+        &Priority::Normal,
+        &Vec::new(&env),
+        &ConditionLogic::And,
+        &0i128,
+    );
+
+    client.approve_proposal(&admin, &proposal_id);
+    client.approve_proposal(&signer, &proposal_id);
+
+    // Force the first phase to fail by draining the vault balance.
+    let vault_balance = soroban_sdk::token::Client::new(&env, &token).balance(&client.address);
+    StellarAssetClient::new(&env, &token).burn(&client.address, &vault_balance);
+
+    let outcome = client.execute_proposal(&signer, &proposal_id);
+    assert_eq!(outcome, PhaseExecutionOutcome::Failed);
+
+    assert_phase_status(&client, proposal_id, 0, PhaseStatus::Failed);
+    assert_eq!(
+        client.get_proposal(&proposal_id).status,
+        ProposalStatus::Rejected
+    );
+
+    let contract_id = client.address.clone();
+    assert_eq!(count_phase_events(&env, &contract_id, "phase_failed"), 1);
+    assert_eq!(count_phase_events(&env, &contract_id, "phase_executed"), 0);
+
+    let audit = client.get_audit_entries();
+    assert!(audit.len() > 0);
+}
+
+/// Middle-phase failure: an earlier phase succeeds, a later one fails.
+#[test]
+fn test_middle_phase_failure_marks_rejected() {
+    let env = Env::default();
+    let (client, admin, signer, token, recipient) = setup_phase_env(&env);
+
+    let proposal_id = client.propose_transfer(
+        &signer,
+        &recipient,
+        &token,
+        &100,
+        &Symbol::new(&env, "phases"),
+        &Priority::Normal,
+        &Vec::new(&env),
+        &ConditionLogic::And,
+        &0i128,
+    );
+
+    client.approve_proposal(&admin, &proposal_id);
+    client.approve_proposal(&signer, &proposal_id);
+
+    // Leave just enough for the first phase but not the second.
+    let vault_balance = soroban_sdk::token::Client::new(&env, &token).balance(&client.address);
+    StellarAssetClient::new(&env, &token).burn(&client.address, &(vault_balance - 50));
+
+    let outcome = client.execute_proposal(&signer, &proposal_id);
+    assert_eq!(outcome, PhaseExecutionOutcome::Failed);
+
+    assert_phase_status(&client, proposal_id, 0, PhaseStatus::Executed);
+    assert_phase_status(&client, proposal_id, 1, PhaseStatus::Failed);
+    assert_eq!(
+        client.get_proposal(&proposal_id).status,
+        ProposalStatus::Rejected
+    );
+
+    let contract_id = client.address.clone();
+    assert_eq!(count_phase_events(&env, &contract_id, "phase_executed"), 1);
+    assert_eq!(count_phase_events(&env, &contract_id, "phase_failed"), 1);
+
+    let audit = client.get_audit_entries();
+    assert!(audit.len() > 0);
+}
+
+/// Last-phase failure: all preceding phases succeed, the final one fails.
+#[test]
+fn test_last_phase_failure_marks_rejected() {
+    let env = Env::default();
+    let (client, admin, signer, token, recipient) = setup_phase_env(&env);
+
+    let proposal_id = client.propose_transfer(
+        &signer,
+        &recipient,
+        &token,
+        &100,
+        &Symbol::new(&env, "phases"),
+        &Priority::Normal,
+        &Vec::new(&env),
+        &ConditionLogic::And,
+        &0i128,
+    );
+
+    client.approve_proposal(&admin, &proposal_id);
+    client.approve_proposal(&signer, &proposal_id);
+
+    let statuses = phase_statuses(&client, proposal_id);
+    let last = statuses.len() - 1;
+
+    // Drain everything so the final phase cannot settle.
+    let vault_balance = soroban_sdk::token::Client::new(&env, &token).balance(&client.address);
+    StellarAssetClient::new(&env, &token).burn(&client.address, &vault_balance);
+
+    let outcome = client.execute_proposal(&signer, &proposal_id);
+    assert_eq!(outcome, PhaseExecutionOutcome::Failed);
+
+    for i in 0..last {
+        assert_phase_status(&client, proposal_id, i, PhaseStatus::Executed);
+    }
+    assert_phase_status(&client, proposal_id, last, PhaseStatus::Failed);
+    assert_eq!(
+        client.get_proposal(&proposal_id).status,
+        ProposalStatus::Rejected
+    );
+
+    let contract_id = client.address.clone();
+    assert_eq!(
+        count_phase_events(&env, &contract_id, "phase_executed"),
+        last
+    );
+    assert_eq!(count_phase_events(&env, &contract_id, "phase_failed"), 1);
+
+    let audit = client.get_audit_entries();
+    assert!(audit.len() > 0);
+}

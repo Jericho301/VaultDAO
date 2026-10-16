@@ -458,3 +458,172 @@ fn test_empty_signer_snapshot_error_message_guidance() {
         "update_config_signers must reject empty list with NoSigners"
     );
 }
+
+/// Paginated proposal query: a cursor of 0 starts from the beginning and
+/// returns at most `limit` proposals.
+#[test]
+fn test_get_proposals_paginated_first_page() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _signer1, _signer2, _contract_id) = setup(&env);
+
+    let token_admin = Address::generate(&env);
+    let token = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
+
+    for _ in 0..5 {
+        let recipient = Address::generate(&env);
+        make_proposal(&env, &client, &admin, &token, &recipient, 100);
+    }
+
+    let page = client.get_proposals_paginated(&0u64, &2u32);
+    assert_eq!(page.len(), 2, "first page must respect the limit");
+}
+
+/// Paginated proposal query: iterating with the returned cursor yields every
+/// proposal exactly once, with no duplicates or gaps.
+#[test]
+fn test_get_proposals_paginated_cursor_iteration() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _signer1, _signer2, _contract_id) = setup(&env);
+
+    let token_admin = Address::generate(&env);
+    let token = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
+
+    let total = 5u64;
+    for _ in 0..total {
+        let recipient = Address::generate(&env);
+        make_proposal(&env, &client, &admin, &token, &recipient, 100);
+    }
+
+    let mut cursor = 0u64;
+    let mut seen = 0u64;
+    loop {
+        let page = client.get_proposals_paginated(&cursor, &2u32);
+        if page.is_empty() {
+            break;
+        }
+        for proposal in page.iter() {
+            assert!(
+                proposal.id > cursor,
+                "returned proposals must be strictly after the cursor"
+            );
+            cursor = proposal.id;
+            seen += 1;
+        }
+    }
+
+    assert_eq!(seen, total, "cursor iteration must visit every proposal once");
+}
+
+/// Paginated proposal query: a cursor past the last proposal returns an empty page.
+#[test]
+fn test_get_proposals_paginated_empty_past_end() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _signer1, _signer2, _contract_id) = setup(&env);
+
+    let token_admin = Address::generate(&env);
+    let token = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
+    let recipient = Address::generate(&env);
+    let last_id = make_proposal(&env, &client, &admin, &token, &recipient, 100);
+
+    let page = client.get_proposals_paginated(&last_id, &10u32);
+    assert!(page.is_empty(), "cursor past the end must return no proposals");
+}
+
+/// Paginated proposal query: a zero limit returns an empty page.
+#[test]
+fn test_get_proposals_paginated_zero_limit() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _signer1, _signer2, _contract_id) = setup(&env);
+
+    let token_admin = Address::generate(&env);
+    let token = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
+    let recipient = Address::generate(&env);
+    make_proposal(&env, &client, &admin, &token, &recipient, 100);
+
+    let page = client.get_proposals_paginated(&0u64, &0u32);
+    assert!(page.is_empty(), "zero limit must return no proposals");
+}
+
+/// Paginated proposal query: a limit above the internal cap is clamped rather
+/// than rejected, and never returns more than the cap.
+#[test]
+fn test_get_proposals_paginated_limit_cap() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _signer1, _signer2, _contract_id) = setup(&env);
+
+    let token_admin = Address::generate(&env);
+    let token = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
+
+    for _ in 0..3 {
+        let recipient = Address::generate(&env);
+        make_proposal(&env, &client, &admin, &token, &recipient, 100);
+    }
+
+    // Requesting an absurd limit must not error and must not exceed the cap.
+    let page = client.get_proposals_paginated(&0u64, &u32::MAX);
+    assert!(page.len() <= 3, "page must not exceed the number of proposals");
+}
+
+/// `get_executable_proposals` caps the number of returned proposals at the
+/// requested limit.
+#[test]
+fn test_get_executable_proposals_respects_limit() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _signer1, _signer2, _contract_id) = setup(&env);
+
+    let token_admin = Address::generate(&env);
+    let token = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
+
+    for _ in 0..5 {
+        let recipient = Address::generate(&env);
+        make_proposal(&env, &client, &admin, &token, &recipient, 100);
+    }
+
+    let executable = client.get_executable_proposals(&2u32);
+    assert!(
+        executable.len() <= 2,
+        "get_executable_proposals must respect the requested limit"
+    );
+}
+
+/// `get_executable_proposals` clamps an oversized limit instead of failing.
+#[test]
+fn test_get_executable_proposals_limit_cap() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, _signer1, _signer2, _contract_id) = setup(&env);
+
+    let token_admin = Address::generate(&env);
+    let token = env
+        .register_stellar_asset_contract_v2(token_admin.clone())
+        .address();
+
+    for _ in 0..3 {
+        let recipient = Address::generate(&env);
+        make_proposal(&env, &client, &admin, &token, &recipient, 100);
+    }
+
+    let executable = client.get_executable_proposals(&u32::MAX);
+    assert!(
+        executable.len() <= 3,
+        "oversized limit must be clamped, not rejected"
+    );
+}

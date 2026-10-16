@@ -168,3 +168,11 @@ For current attack-surface notes, invariants, and known findings, read [`../AUDI
 ## Configuration Authority
 
 Operators should know which vault parameters require a signer supermajority and which a single Admin can change directly. [`../guides/GOVERNANCE_CONFIG_CHANGES.md`](../guides/GOVERNANCE_CONFIG_CHANGES.md) documents `set_governance_threshold`, `propose_config_change`, `approve_config_change` and `execute_config_change`, lists every config parameter with its required authority, and calls out the known paths where a direct Admin setter bypasses governance. Reports showing such a bypass beyond the ones already listed there are in scope under "Governance bypasses" above.
+
+## Emergency Pause Coverage
+
+The emergency pause guard is enforced on every vote entry point, not just on proposal execution. All four vote paths — `approve_proposal`, `reject_proposal`, `approve_config_change`, and `reject_config_change` — reject calls while the vault is paused, so no governance advancement can occur during a pause.
+
+This closes the previously identified gap where a paused vault could still accumulate approvals or rejections and advance governance state. Because the guard is applied uniformly across all four entry points, a pause now freezes the full governance lifecycle: proposals cannot be approved or rejected, and config changes cannot be approved or rejected, until the pause is lifted.
+
+Reports that demonstrate a vote entry point advancing governance state while the vault is paused are in scope under "Governance bypasses" above. Reports that rely on the documented pause behavior itself are out of scope.

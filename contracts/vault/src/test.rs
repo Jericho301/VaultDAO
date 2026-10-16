@@ -7232,3 +7232,181 @@ fn test_recurring_payment_grace_period() {
     let result = client.try_execute_recurring_payment(&payment_id);
     assert!(result.is_err());
 }
+
+// ============================================================================
+// validate_limits_pending with auto_cancel = true
+// ============================================================================
+
+/// Build a vault with a single treasurer signer and a funded token.
+#[allow(dead_code)]
+fn setup_auto_cancel_vault(
+    env: &Env,
+) -> (
+    VaultDAOClient<'_>,
+    Address,
+    Address,
+    Address,
+    Address,
+    Address,
+) {
+    env.mock_all_auths();
+
+    let contract_id = env.register(VaultDAO, ());
+    let client = VaultDAOClient::new(env, &contract_id);
+
+    let admin = Address::generate(env);
+    let proposer = Address::generate(env);
+    let recipient = Address::generate(env);
+
+    let token_admin = Address::generate(env);
+    let sac = env.register_stellar_asset_contract_v2(token_admin.clone());
+    let token = sac.address();
+    let sac_admin = StellarAssetClient::new(env, &token);
+
+    let mut signers = Vec::new(env);
+    signers.push_back(admin.clone());
+    signers.push_back(proposer.clone());
+
+    let config = default_init_config(env, signers, 2);
+    client.initialize(&admin, &config);
+    client.set_role(&admin, &proposer, &Role::Treasurer);
+
+    sac_admin.mint(&contract_id, &100_000);
+    sac_admin.mint(&proposer, &100_000);
+
+    (client, admin, proposer, recipient, token, contract_id)
+}
+
+/// After `validate_limits_pending` with `auto_cancel = true`:
+/// (a) the spending reservation is refunded (daily/weekly counters decrease),
+/// (b) the insurance deposit is returned to the proposer,
+/// (c) the stake record is settled,
+/// (d) a cancellation record is stored, and
+/// (e) the summary event is emitted.
+#[test]
+fn test_validate_limits_pending_auto_cancel_refunds_and_records() {
+    let env = Env::default();
+    let (client, admin, proposer, recipient, token, _contract_id) = setup_auto_cancel_vault(&env);
+
+    // Enable insurance so a deposit is taken at proposal time.
+    let ins_config = InsuranceConfig {
+        enabled: true,
+        min_amount: 10,
+        min_insurance_bps: 500, // 5%
+        slash_percentage: 50,
+    };
+    client.set_insurance_config(&admin, &ins_config);
+
+    let token_client = soroban_sdk::token::Client::new(&env, &token);
+    let proposer_balance_before = token_client.balance(&proposer);
+
+    // Propose a transfer that reserves spending and posts an insurance deposit.
+    let proposal_id = client.propose_transfer(
+        &proposer,
+        &recipient,
+        &token,
+        &1000i128,
+        &Symbol::new(&env, "auto_cancel"),
+        &Priority::Normal,
+        &Vec::new(&env),
+        &ConditionLogic::And,
+        &50i128, // insurance deposit
+    );
+
+    // The insurance deposit should have been taken from the proposer.
+    assert_eq!(token_client.balance(&proposer), proposer_balance_before - 50);
+
+    // Capture the spending counters after the reservation.
+    let daily_after_reserve = client.get_daily_spent(&token);
+    let weekly_after_reserve = client.get_weekly_spent(&token);
+    assert!(daily_after_reserve > 0);
+    assert!(weekly_after_reserve > 0);
+
+    // Run the pending-limit validation with auto_cancel enabled.
+    client.validate_limits_pending(&admin, &true);
+
+    // (a) Spending reservation refunded: counters decrease back toward zero.
+    let daily_after_cancel = client.get_daily_spent(&token);
+    let weekly_after_cancel = client.get_weekly_spent(&token);
+    assert!(
+        daily_after_cancel < daily_after_reserve,
+        "daily counter should decrease after auto-cancel refund"
+    );
+    assert!(
+        weekly_after_cancel < weekly_after_reserve,
+        "weekly counter should decrease after auto-cancel refund"
+    );
+
+    // (b) Insurance deposit returned to the proposer.
+    assert_eq!(
+        token_client.balance(&proposer),
+        proposer_balance_before,
+        "insurance deposit should be refunded to the proposer"
+    );
+
+    // (c) Stake record settled (refunded or slashed per cancellation rate).
+    let stake = client.get_stake_record(&proposer);
+    assert!(
+        stake.is_none() || stake.unwrap().amount == 0,
+        "stake record should be settled after auto-cancel"
+    );
+
+    // (d) A cancellation record is stored for the proposal.
+    let cancellation = client.get_cancellation_record(&proposal_id);
+    assert!(
+        cancellation.is_some(),
+        "a cancellation record should be stored for the auto-cancelled proposal"
+    );
+
+    // (e) The summary event is emitted.
+    let expected_topic = Symbol::new(&env, "limits_auto_cancel");
+    let mut found = false;
+    for (_, topics, _) in env.events().all().iter() {
+        let is_match = topics
+            .first()
+            .and_then(|t| Symbol::try_from_val(&env, &t).ok())
+            .map(|s| s == expected_topic)
+            .unwrap_or(false);
+        if is_match {
+            found = true;
+            break;
+        }
+    }
+    assert!(found, "limits_auto_cancel summary event should be emitted");
+}
+
+/// Pagination parameters must bound the scan, and the loop must start at ID 1.
+#[test]
+fn test_validate_limits_pending_pagination_bounds_scan() {
+    let env = Env::default();
+    let (client, admin, proposer, recipient, token, _contract_id) = setup_auto_cancel_vault(&env);
+
+    // Create several proposals so there is something to scan.
+    let mut proposal_ids = Vec::new(&env);
+    for _ in 0..5 {
+        let pid = client.propose_transfer(
+            &proposer,
+            &recipient,
+            &token,
+            &100i128,
+            &Symbol::new(&env, "page"),
+            &Priority::Normal,
+            &Vec::new(&env),
+            &ConditionLogic::And,
+            &0i128,
+        );
+        proposal_ids.push_back(pid);
+    }
+
+    // The first proposal ID must be 1 (loop starts at ID 1).
+    assert_eq!(proposal_ids.get(0).unwrap(), 1);
+
+    // A bounded scan (offset 0, limit 2) must not scan beyond the limit.
+    client.validate_limits_pending_paginated(&admin, &true, &0u64, &2u32);
+
+    // A scan starting at offset 1 with limit 2 must also succeed and be bounded.
+    client.validate_limits_pending_paginated(&admin, &true, &1u64, &2u32);
+
+    // A zero limit must scan nothing and succeed.
+    client.validate_limits_pending_paginated(&admin, &true, &0u64, &0u32);
+}

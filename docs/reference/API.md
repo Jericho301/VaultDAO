@@ -229,11 +229,13 @@ Execute an approved proposal, transferring funds.
 - Gas limit not exceeded
 
 **Behavior:**
-- Transfers amount to recipient
+- Carves the execution fee out of `proposal.amount`: the recipient receives `amount - fee`, and the fee is credited to the collected-fee pool for the proposal's token
+- Requires only `amount + insurance_amount` of vault liquidity (the fee is not an additional draw on the vault)
 - Returns insurance to proposer (if staked)
 - Refunds stake to proposer (if locked)
 - Updates reputation scores
 - Records in audit trail
+- Emits `proposal_executed` with the net amount sent to the recipient and the fee as separate fields
 
 **Errors:**
 - `ProposalNotApproved` - Threshold not met

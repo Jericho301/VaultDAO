@@ -255,6 +255,90 @@ fn test_abstain_one_past_deadline_returns_error() {
     assert_eq!(proposal.status, ProposalStatus::Rejected);
 }
 
+// ---------------------------------------------------------------------------
+// Test 6 — Past `expires_at`: approve_proposal returns Ok(()) and marks Expired
+//
+// When the current ledger is past the proposal's `expires_at`, the proposal is
+// no longer votable.  The call must return Ok(()) (not an error) and the
+// proposal must end up Expired with no approval recorded.
+// ---------------------------------------------------------------------------
+#[test]
+fn test_approve_past_expiry_marks_expired_without_recording_vote() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    // Proposal created at ledger 1000 with voting_deadline = 1000 + 10 = 1010
+    let (client, signer, proposal_id) = setup_vault_with_deadline_proposal(&env, 1000, 10);
+
+    let expires_at = client.get_proposal(&proposal_id).expires_at;
+    assert!(
+        expires_at > 0,
+        "proposal must have a non-zero expires_at for this test"
+    );
+
+    // Advance past expiry
+    env.ledger().set_sequence_number(expires_at + 1);
+
+    let result = client.try_approve_proposal(&signer, &proposal_id);
+    assert!(
+        result.is_ok(),
+        "approve_proposal past expires_at must return Ok(())"
+    );
+
+    let proposal = client.get_proposal(&proposal_id);
+    assert_eq!(
+        proposal.status,
+        ProposalStatus::Expired,
+        "proposal must be Expired when past expires_at"
+    );
+    assert_eq!(
+        proposal.approvals.len(),
+        0,
+        "no approval must be recorded when past expires_at"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test 7 — Past `expires_at`: abstain_proposal returns Ok(()) and marks Expired
+//
+// Same as Test 6 but for abstentions.
+// ---------------------------------------------------------------------------
+#[test]
+fn test_abstain_past_expiry_marks_expired_without_recording_vote() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    // Proposal created at ledger 1000 with voting_deadline = 1000 + 10 = 1010
+    let (client, signer, proposal_id) = setup_vault_with_deadline_proposal(&env, 1000, 10);
+
+    let expires_at = client.get_proposal(&proposal_id).expires_at;
+    assert!(
+        expires_at > 0,
+        "proposal must have a non-zero expires_at for this test"
+    );
+
+    // Advance past expiry
+    env.ledger().set_sequence_number(expires_at + 1);
+
+    let result = client.try_abstain_proposal(&signer, &proposal_id);
+    assert!(
+        result.is_ok(),
+        "abstain_proposal past expires_at must return Ok(())"
+    );
+
+    let proposal = client.get_proposal(&proposal_id);
+    assert_eq!(
+        proposal.status,
+        ProposalStatus::Expired,
+        "proposal must be Expired when past expires_at"
+    );
+    assert_eq!(
+        proposal.abstentions.len(),
+        0,
+        "no abstention must be recorded when past expires_at"
+    );
+}
+
 // ===========================================================================
 // Preservation Tests — Property 2
 //
@@ -962,6 +1046,99 @@ fn test_abstain_after_deadline_preserves_spent() {
         token_spent(&client, &token),
         before_token,
         "per-token spent must be unchanged after a deadline-rejected abstention"
+// change_vote Deadline Tests
+//
+// **Validates: Requirements 1.1, 1.2, 3.1**
+//
+// `change_vote` must respect the same deadline semantics as approve/abstain:
+//   - voting_deadline == 0  → succeeds at any ledger
+//   - current_ledger <= voting_deadline → succeeds
+//   - current_ledger >  voting_deadline → returns VotingClosed
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// Test CV-1 — change_vote with voting_deadline = 0 succeeds at any ledger
+// ---------------------------------------------------------------------------
+#[test]
+fn test_change_vote_zero_deadline_succeeds_at_any_ledger() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, signer1, _signer2, proposal_id) = setup_vault_no_deadline(&env, 1000);
+
+    // Record an initial approval so there is a vote to change.
+    client.approve_proposal(&signer1, &proposal_id);
+
+    // Advance ledger well past where a deadline would be — no deadline enforced.
+    env.ledger().set_sequence_number(10_000);
+
+    let result = client.try_change_vote(&signer1, &proposal_id, &Vote::Abstain);
+    assert!(
+        result.is_ok(),
+        "change_vote with voting_deadline=0 must succeed regardless of current ledger"
+    );
+
+    let proposal = client.get_proposal(&proposal_id);
+    assert_eq!(
+        proposal.abstentions.len(),
+        1,
+        "changed vote must be recorded as an abstention when voting_deadline=0"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test CV-2 — change_vote before the deadline succeeds
+// ---------------------------------------------------------------------------
+#[test]
+fn test_change_vote_before_deadline_succeeds() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    // Proposal created at ledger 1000 with voting_deadline = 1000 + 100 = 1100
+    let (client, signer1, proposal_id) = setup_vault_with_deadline_proposal(&env, 1000, 100);
+
+    // Record an initial approval within the window.
+    env.ledger().set_sequence_number(1050);
+    client.approve_proposal(&signer1, &proposal_id);
+
+    // Change the vote while still before the deadline.
+    let result = client.try_change_vote(&signer1, &proposal_id, &Vote::Abstain);
+    assert!(
+        result.is_ok(),
+        "change_vote before voting_deadline must succeed"
+    );
+
+    let proposal = client.get_proposal(&proposal_id);
+    assert_eq!(
+        proposal.abstentions.len(),
+        1,
+        "changed vote must be recorded as an abstention before the deadline"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test CV-3 — change_vote after the deadline returns VotingClosed
+// ---------------------------------------------------------------------------
+#[test]
+fn test_change_vote_after_deadline_returns_voting_closed() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    // Proposal created at ledger 1000 with voting_deadline = 1000 + 10 = 1010
+    let (client, signer1, proposal_id) = setup_vault_with_deadline_proposal(&env, 1000, 10);
+
+    // Record an initial approval within the window.
+    env.ledger().set_sequence_number(1005);
+    client.approve_proposal(&signer1, &proposal_id);
+
+    // Advance past the deadline: 1011 > 1010
+    env.ledger().set_sequence_number(1011);
+
+    let result = client.try_change_vote(&signer1, &proposal_id, &Vote::Abstain);
+    assert_eq!(
+        result.err(),
+        Some(Ok(VaultError::VotingClosed)),
+        "change_vote after voting_deadline must return VotingClosed"
     );
 }
 

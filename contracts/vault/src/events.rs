@@ -90,14 +90,19 @@ pub fn emit_proposal_ready(env: &Env, proposal_id: u64, unlock_ledger: u64) {
     );
 }
 
-/// Emit when a proposal is executed (enhanced: includes token and ledger)
+/// Emit when a proposal is executed (enhanced: includes token and ledger).
+///
+/// Publishes both `net_amount` (what the recipient actually received) and
+/// `fee_amount` (what was withheld) so off-chain observers can distinguish
+/// the gross payout from the net payout without replaying fee logic.
 pub fn emit_proposal_executed(
     env: &Env,
     proposal_id: u64,
     executor: &Address,
     recipient: &Address,
     token: &Address,
-    amount: i128,
+    net_amount: i128,
+    fee_amount: i128,
     ledger: u64,
 ) {
     env.events().publish(
@@ -106,7 +111,8 @@ pub fn emit_proposal_executed(
             executor.clone(),
             recipient.clone(),
             token.clone(),
-            amount,
+            net_amount,
+            fee_amount,
             ledger,
         ),
     );
@@ -164,6 +170,26 @@ pub fn emit_delegated_vote(
     );
 }
 
+/// Emit when a delegated vote is skipped for a voter.
+///
+/// # Arguments
+/// * `proposal_id` - The proposal the delegated vote applied to.
+/// * `voter` - The skipped voter (the delegator whose vote was skipped).
+/// * `signer` - The acting signer (the delegate) that skipped the vote.
+/// * `reason` - Why the vote was skipped, e.g. `abstained` or `approved`.
+pub fn emit_delegated_vote_skipped(
+    env: &Env,
+    proposal_id: u64,
+    voter: &Address,
+    signer: &Address,
+    reason: &Symbol,
+) {
+    env.events().publish(
+        (Symbol::new(env, "delegated_vote_skipped"), proposal_id),
+        (voter.clone(), signer.clone(), reason.clone()),
+    );
+}
+
 pub fn emit_proposal_scheduled(
     env: &Env,
     proposal_id: u64,
@@ -184,6 +210,28 @@ pub fn emit_proposal_rejected(env: &Env, proposal_id: u64, rejector: &Address, p
     );
 }
 
+/// Emit when a signer casts a rejection vote, tracking progress toward the
+/// rejection threshold.
+///
+/// Topics: `("proposal_rejection_vote", proposal_id)`
+/// Data:   `(voter, rejection_vote_count, required_threshold)`
+///
+/// `rejection_vote_count` is the cumulative number of rejection votes recorded
+/// for the proposal after this vote; `required_threshold` is the number of
+/// rejection votes needed to reject the proposal outright.
+pub fn emit_proposal_rejection_vote(
+    env: &Env,
+    proposal_id: u64,
+    voter: &Address,
+    rejection_vote_count: u32,
+    required_threshold: u32,
+) {
+    env.events().publish(
+        (Symbol::new(env, "proposal_rejection_vote"), proposal_id),
+        (voter.clone(), rejection_vote_count, required_threshold),
+    );
+}
+
 /// Emit when a signer explicitly rejects a proposal via `reject_proposal` (Issue #1522).
 ///
 /// Published under the same `proposal_rejected` topic as `emit_proposal_rejected` since
@@ -198,6 +246,48 @@ pub fn emit_proposal_explicit_rejection(
     env.events().publish(
         (Symbol::new(env, "proposal_rejected"), proposal_id),
         (rejector.clone(), total_rejection_count),
+    );
+}
+
+/// Emit each time a rejection vote is accumulated on a proposal, before the
+/// proposal has necessarily reached its final rejected state.
+///
+/// This lets indexers observe partial rejection progress (how many rejection
+/// votes have been cast so far and how many are still needed) rather than only
+/// seeing the terminal `proposal_rejected` transition.
+///
+/// Topics: `("proposal_rejection_vote", proposal_id)`
+/// Data:   `(rejector, rejection_count, rejection_threshold)`
+pub fn emit_proposal_rejection_vote(
+    env: &Env,
+    proposal_id: u64,
+    rejector: &Address,
+    rejection_count: u32,
+    rejection_threshold: u32,
+) {
+    env.events().publish(
+        (Symbol::new(env, "proposal_rejection_vote"), proposal_id),
+        (rejector.clone(), rejection_count, rejection_threshold),
+    );
+}
+
+/// Emit when a proposal transitions into its final rejected state as a result
+/// of accumulated rejection votes.
+///
+/// Distinct from `emit_proposal_rejection_vote` so indexers can tell the final
+/// rejection transition apart from intermediate rejection-vote progress.
+///
+/// Topics: `("proposal_rejection_final", proposal_id)`
+/// Data:   `(rejection_count, rejection_threshold)`
+pub fn emit_proposal_rejection_final(
+    env: &Env,
+    proposal_id: u64,
+    rejection_count: u32,
+    rejection_threshold: u32,
+) {
+    env.events().publish(
+        (Symbol::new(env, "proposal_rejection_final"), proposal_id),
+        (rejection_count, rejection_threshold),
     );
 }
 
@@ -854,6 +944,18 @@ pub fn emit_dead_letter_processed(env: &Env, record_id: u64, admin: &Address) {
     env.events().publish(
         (Symbol::new(env, "dead_letter_proc"), record_id),
         admin.clone(),
+    );
+}
+
+pub fn emit_dead_letter_requeued(
+    env: &Env,
+    record_id: u64,
+    proposal_id: u64,
+    admin: &Address,
+) {
+    env.events().publish(
+        (Symbol::new(env, "dead_letter_requeued"), record_id),
+        (proposal_id, admin.clone()),
     );
 }
 
@@ -2111,6 +2213,20 @@ pub fn emit_proposal_auto_cancelled_limit_exceeded(
     );
 }
 
+/// Emit a summary of a batch auto-cancellation of proposals.
+///
+/// Published once per batch so indexers can observe the full set of proposals
+/// that were cancelled together, along with the total count.
+///
+/// Topics: `("proposals_auto_cancelled",)`
+/// Data:   `(cancelled_ids, count)`
+pub fn emit_proposals_auto_cancelled_summary(env: &Env, cancelled_ids: Vec<u64>, count: u32) {
+    env.events().publish(
+        (Symbol::new(env, "proposals_auto_cancelled"),),
+        (cancelled_ids, count),
+    );
+}
+
 /// Emit when a signer's rolling participation rate has stayed below
 /// `Config.min_participation_rate` for `Config.low_participation_consecutive_proposals`
 /// proposals in a row (Issue #1093).
@@ -2420,6 +2536,66 @@ pub fn emit_vesting_cancelled(
     env.events().publish(
         (Symbol::new(env, "vesting_cancelled"), schedule_id),
         (admin.clone(), vested_unclaimed_paid, unvested_returned),
+    );
+}
+
+// ============================================================================
+// Multi-Phase Execution Events
+// ============================================================================
+
+/// Emit when a single phase of a multi-phase proposal execution completes.
+///
+/// Topics: `("phase_executed", proposal_id)`
+/// Data:   `(phase_index, executor, ledger)`
+// Phase Execution Events
+// ============================================================================
+
+/// Emit when a proposal phase executes successfully.
+///
+/// Topics: `("phase_executed", proposal_id)`
+/// Data:   `(phase_index, status, error_code)`
+pub fn emit_phase_executed(
+    env: &Env,
+    proposal_id: u64,
+    phase_index: u32,
+    executor: &Address,
+    ledger: u64,
+) {
+    env.events().publish(
+        (Symbol::new(env, "phase_executed"), proposal_id),
+        (phase_index, executor.clone(), ledger),
+    );
+}
+
+/// Emit when a phase of a multi-phase proposal execution fails.
+///
+/// Topics: `("phase_failed", proposal_id)`
+/// Data:   `(phase_index, executor, error_code)`
+    status: u32,
+    error_code: u32,
+) {
+    env.events().publish(
+        (Symbol::new(env, "phase_executed"), proposal_id),
+        (phase_index, status, error_code),
+    );
+}
+
+/// Emit when a proposal phase fails.
+///
+/// Topics: `("phase_failed", proposal_id)`
+/// Data:   `(phase_index, status, error_code)`
+pub fn emit_phase_failed(
+    env: &Env,
+    proposal_id: u64,
+    phase_index: u32,
+    executor: &Address,
+    status: u32,
+    error_code: u32,
+) {
+    env.events().publish(
+        (Symbol::new(env, "phase_failed"), proposal_id),
+        (phase_index, executor.clone(), error_code),
+        (phase_index, status, error_code),
     );
 }
 

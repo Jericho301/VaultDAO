@@ -199,6 +199,48 @@ fn test_whitelist_proposal_rejects_removing_absent_address() {
     assert_eq!(result, Err(Ok(VaultError::PhaseExecutionFailed)));
 }
 
+/// When a phase fails mid-execution, the failing phase is persisted as
+/// `Failed`, any already-executed phases are persisted as `RolledBack`, and
+/// the base proposal is marked `Rejected`.
+#[test]
+fn test_multi_phase_failure_persists_phase_statuses_and_rejects_proposal() {
+    let env = Env::default();
+    let (client, admin, signer1, _s2) = setup(&env);
+    let first = Address::generate(&env);
+    let second = Address::generate(&env);
+
+    // The first phase succeeds; the second fails because `second` is already
+    // whitelisted.
+    client.add_to_whitelist(&admin, &second);
+
+    let mut phases = Vec::new(&env);
+    phases.push_back(ProposalPhase {
+        operation: ProposalOperation::UpdateWhitelist(first.clone(), ListAction::Add),
+        rollback_operation: OptionalProposalOperation::None,
+        status: ProposalPhaseStatus::Pending,
+    });
+    phases.push_back(ProposalPhase {
+        operation: ProposalOperation::UpdateWhitelist(second.clone(), ListAction::Add),
+        rollback_operation: OptionalProposalOperation::None,
+        status: ProposalPhaseStatus::Pending,
+    });
+
+    let proposal_id = client.create_multi_phase_proposal(&admin, &phases);
+    client.approve_proposal(&admin, &proposal_id);
+    client.approve_proposal(&signer1, &proposal_id);
+
+    let result = client.try_execute_multi_phase_proposal(&admin, &proposal_id);
+    assert_eq!(result, Err(Ok(VaultError::PhaseExecutionFailed)));
+
+    let proposal = client.get_proposal(&proposal_id);
+    assert_eq!(proposal.status, crate::types::ProposalStatus::Rejected);
+
+    let stored = client.get_proposal_phases(&proposal_id);
+    assert_eq!(stored.len(), 2);
+    assert_eq!(stored.get(0).unwrap().status, ProposalPhaseStatus::RolledBack);
+    assert_eq!(stored.get(1).unwrap().status, ProposalPhaseStatus::Failed);
+}
+
 /// A single proposal may carry several whitelist changes; all apply together.
 #[test]
 fn test_whitelist_proposal_multiple_phases() {

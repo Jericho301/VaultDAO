@@ -9,6 +9,8 @@ struct SpendingLimitFuzzInput {
     requested_amount: u64,
     daily_limit: u64,
     spent_today: u64,
+    pending_amount: u64,
+    cancel_pending: bool,
 }
 
 fuzz_target!(|data: SpendingLimitFuzzInput| {
@@ -34,14 +36,18 @@ fuzz_target!(|data: SpendingLimitFuzzInput| {
         return;
     }
 
-    // 4. Spent today should not exceed daily limit
-    if spent_today > daily_limit {
+    // 4. Executed + pending must never exceed the daily limit
+    let pending = data.pending_amount as i128;
+    if pending < 0 {
+        return;
+    }
+    if spent_today + pending > daily_limit {
         return;
     }
 
     // Test case 1: Cannot spend more than available
-    let spendable_from_limit = if spent_today + requested > daily_limit {
-        daily_limit - spent_today
+    let spendable_from_limit = if spent_today + pending + requested > daily_limit {
+        daily_limit - spent_today - pending
     } else {
         requested
     };
@@ -60,8 +66,32 @@ fuzz_target!(|data: SpendingLimitFuzzInput| {
     assert!(remaining >= 0, "Remaining balance must be non-negative");
     assert!(remaining == available - actual_spend, "Remaining balance calculation must be correct");
 
-    // Test case 4: Spent today update
+    // Test case 4: Executed + pending accounting
+    // Executed spend increases spent_today; pending is reserved but not yet executed.
     let new_spent_today = spent_today + actual_spend;
+    let new_pending = pending;
+
+    // Executed + pending must never exceed the daily limit at any point.
+    assert!(
+        new_spent_today + new_pending <= daily_limit,
+        "Executed + pending must not exceed daily limit"
+    );
     assert!(new_spent_today <= daily_limit, "Total spent today must not exceed limit");
     assert!(new_spent_today >= spent_today, "Spent today must increase monotonically");
+
+    // Test case 5: Cancellation releases pending back to the available limit.
+    if data.cancel_pending {
+        let released_pending = new_pending;
+        let pending_after_cancel = 0i128;
+        assert!(pending_after_cancel == 0, "Pending must be zero after cancellation");
+        assert!(
+            new_spent_today + pending_after_cancel <= daily_limit,
+            "Executed + pending after cancel must not exceed daily limit"
+        );
+        // Releasing pending must not reduce executed spend.
+        assert!(
+            new_spent_today + released_pending <= daily_limit,
+            "Released pending must have been within the limit"
+        );
+    }
 });

@@ -169,6 +169,199 @@ fn scenario_storage_write(context: &Context) {
     client.update_threshold(&context.admin, &2);
 }
 
+fn seed_proposals(context: &Context, count: u32) {
+    for _ in 0..count {
+        propose(context);
+    }
+}
+
+fn scenario_list_proposal_ids(context: &Context) {
+    let client = VaultDAOClient::new(&context.env, &context.contract_id);
+    let _ids = client.list_proposal_ids(&0, &20);
+}
+
+fn scenario_get_executable_proposals(context: &Context) {
+    let client = VaultDAOClient::new(&context.env, &context.contract_id);
+    let _ids = client.get_executable_proposals(&0, &20);
+}
+
+fn scenario_auto_expire_proposals(context: &Context) {
+    let client = VaultDAOClient::new(&context.env, &context.contract_id);
+    let _expired = client.auto_expire_proposals(&context.admin, &20);
+}
+
+fn benchmark_proposals(
+    name: &'static str,
+    storage_profile: &'static str,
+    proposal_count: u32,
+    operation: fn(&Context),
+) -> ResultRow {
+    let mut cpu_samples = std::vec::Vec::with_capacity(SAMPLES);
+    let mut memory_samples = std::vec::Vec::with_capacity(SAMPLES);
+    let mut wall_samples = std::vec::Vec::with_capacity(SAMPLES);
+
+    for _ in 0..SAMPLES {
+        let mut context = context();
+        context.env.cost_estimate().budget().reset_unlimited();
+        seed_proposals(&context, proposal_count);
+
+        context.env.cost_estimate().budget().reset_default();
+        let started = Instant::now();
+        operation(&context);
+        wall_samples.push(started.elapsed().as_nanos() as u64);
+
+        let budget = context.env.cost_estimate().budget();
+        cpu_samples.push(budget.cpu_instruction_cost());
+        memory_samples.push(budget.memory_bytes_cost());
+    }
+
+    ResultRow {
+        name,
+        storage_profile,
+        cpu_instructions: median(&mut cpu_samples),
+        memory_bytes: median(&mut memory_samples),
+        wall_time_ns: median(&mut wall_samples),
+    }
+fn seed_proposals(context: &Context, n: u32) {
+    for _ in 0..n {
+        let _proposal_id = propose(context);
+    }
+}
+
+fn seed_vesting(context: &Context, n: u32) {
+    let client = VaultDAOClient::new(&context.env, &context.contract_id);
+    for _ in 0..n {
+        let _entry_id = client.create_vesting_schedule(
+            &context.admin,
+            &Address::generate(&context.env),
+            &context.token,
+            &100,
+            &0,
+            &100,
+            &0,
+        );
+    }
+}
+
+fn seed_recurring(context: &Context, n: u32) {
+    let client = VaultDAOClient::new(&context.env, &context.contract_id);
+    for _ in 0..n {
+        let _entry_id = client.create_recurring_payment(
+            &context.admin,
+            &Address::generate(&context.env),
+            &context.token,
+            &100,
+            &0,
+            &100,
+        );
+    }
+}
+
+fn scenario_list_proposals_offset_first(context: &Context) {
+    let client = VaultDAOClient::new(&context.env, &context.contract_id);
+    let _entries = client.get_proposals(&0, &10);
+}
+
+fn scenario_list_proposals_offset_mid(context: &Context) {
+    let client = VaultDAOClient::new(&context.env, &context.contract_id);
+    let _entries = client.get_proposals(&50, &10);
+}
+
+fn scenario_list_proposals_offset_last(context: &Context) {
+    let client = VaultDAOClient::new(&context.env, &context.contract_id);
+    let _entries = client.get_proposals(&90, &10);
+}
+
+fn scenario_list_proposals_cursor_first(context: &Context) {
+    let client = VaultDAOClient::new(&context.env, &context.contract_id);
+    let _entries = client.get_proposals_cursor(&None, &10);
+}
+
+fn scenario_list_proposals_cursor_mid(context: &Context) {
+    let client = VaultDAOClient::new(&context.env, &context.contract_id);
+    let _entries = client.get_proposals_cursor(&Some(50), &10);
+}
+
+fn scenario_list_proposals_cursor_last(context: &Context) {
+    let client = VaultDAOClient::new(&context.env, &context.contract_id);
+    let _entries = client.get_proposals_cursor(&Some(90), &10);
+}
+
+fn scenario_list_vesting_offset_first(context: &Context) {
+    let client = VaultDAOClient::new(&context.env, &context.contract_id);
+    let _entries = client.get_vesting_schedules(&0, &10);
+}
+
+fn scenario_list_vesting_offset_mid(context: &Context) {
+    let client = VaultDAOClient::new(&context.env, &context.contract_id);
+    let _entries = client.get_vesting_schedules(&50, &10);
+}
+
+fn scenario_list_vesting_offset_last(context: &Context) {
+    let client = VaultDAOClient::new(&context.env, &context.contract_id);
+    let _entries = client.get_vesting_schedules(&90, &10);
+}
+
+fn scenario_list_vesting_cursor_first(context: &Context) {
+    let client = VaultDAOClient::new(&context.env, &context.contract_id);
+    let _entries = client.get_vesting_schedules_cursor(&None, &10);
+}
+
+fn scenario_list_vesting_cursor_mid(context: &Context) {
+    let client = VaultDAOClient::new(&context.env, &context.contract_id);
+    let _entries = client.get_vesting_schedules_cursor(&Some(50), &10);
+}
+
+fn scenario_list_vesting_cursor_last(context: &Context) {
+    let client = VaultDAOClient::new(&context.env, &context.contract_id);
+    let _entries = client.get_vesting_schedules_cursor(&Some(90), &10);
+}
+
+fn scenario_list_recurring_offset_first(context: &Context) {
+    let client = VaultDAOClient::new(&context.env, &context.contract_id);
+    let _entries = client.get_recurring_payments(&0, &10);
+}
+
+fn scenario_list_recurring_offset_mid(context: &Context) {
+    let client = VaultDAOClient::new(&context.env, &context.contract_id);
+    let _entries = client.get_recurring_payments(&50, &10);
+}
+
+fn scenario_list_recurring_offset_last(context: &Context) {
+    let client = VaultDAOClient::new(&context.env, &context.contract_id);
+    let _entries = client.get_recurring_payments(&90, &10);
+}
+
+fn scenario_list_recurring_cursor_first(context: &Context) {
+    let client = VaultDAOClient::new(&context.env, &context.contract_id);
+    let _entries = client.get_recurring_payments_cursor(&None, &10);
+}
+
+fn scenario_list_recurring_cursor_mid(context: &Context) {
+    let client = VaultDAOClient::new(&context.env, &context.contract_id);
+    let _entries = client.get_recurring_payments_cursor(&Some(50), &10);
+}
+
+fn scenario_list_recurring_cursor_last(context: &Context) {
+    let client = VaultDAOClient::new(&context.env, &context.contract_id);
+    let _entries = client.get_recurring_payments_cursor(&Some(90), &10);
+}
+
+fn scenario_executable_paginated_first(context: &Context) {
+    let client = VaultDAOClient::new(&context.env, &context.contract_id);
+    let _entries = client.get_executable_proposals_paginated(&0, &10);
+}
+
+fn scenario_executable_paginated_mid(context: &Context) {
+    let client = VaultDAOClient::new(&context.env, &context.contract_id);
+    let _entries = client.get_executable_proposals_paginated(&50, &10);
+}
+
+fn scenario_executable_paginated_last(context: &Context) {
+    let client = VaultDAOClient::new(&context.env, &context.contract_id);
+    let _entries = client.get_executable_proposals_paginated(&90, &10);
+}
+
 fn median(values: &mut [u64]) -> u64 {
     values.sort_unstable();
     values[values.len() / 2]
@@ -238,6 +431,185 @@ fn main() {
         benchmark("audit_archive_100", "read_write", AUDIT_SEED, scenario_archive),
         benchmark("storage_read", "read_only", AUDIT_SEED, scenario_storage_read),
         benchmark("storage_write", "write", 0, scenario_storage_write),
+        benchmark_proposals(
+            "list_proposal_ids_100",
+            "read_only",
+            100,
+            scenario_list_proposal_ids,
+        ),
+        benchmark_proposals(
+            "list_proposal_ids_1000",
+            "read_only",
+            1_000,
+            scenario_list_proposal_ids,
+        ),
+        benchmark_proposals(
+            "list_proposal_ids_5000",
+            "read_only",
+            5_000,
+            scenario_list_proposal_ids,
+        ),
+        benchmark_proposals(
+            "get_executable_proposals_100",
+            "read_only",
+            100,
+            scenario_get_executable_proposals,
+        ),
+        benchmark_proposals(
+            "get_executable_proposals_1000",
+            "read_only",
+            1_000,
+            scenario_get_executable_proposals,
+        ),
+        benchmark_proposals(
+            "get_executable_proposals_5000",
+            "read_only",
+            5_000,
+            scenario_get_executable_proposals,
+        ),
+        benchmark_proposals(
+            "auto_expire_proposals_100",
+            "read_write",
+            100,
+            scenario_auto_expire_proposals,
+        ),
+        benchmark_proposals(
+            "auto_expire_proposals_1000",
+            "read_write",
+            1_000,
+            scenario_auto_expire_proposals,
+        ),
+        benchmark_proposals(
+            "auto_expire_proposals_5000",
+            "read_write",
+            5_000,
+            scenario_auto_expire_proposals,
+        benchmark(
+            "list_proposals_offset_first_100",
+            "read_only",
+            0,
+            scenario_list_proposals_offset_first,
+        ),
+        benchmark(
+            "list_proposals_offset_mid_100",
+            "read_only",
+            0,
+            scenario_list_proposals_offset_mid,
+        ),
+        benchmark(
+            "list_proposals_offset_last_100",
+            "read_only",
+            0,
+            scenario_list_proposals_offset_last,
+        ),
+        benchmark(
+            "list_proposals_cursor_first_100",
+            "read_only",
+            0,
+            scenario_list_proposals_cursor_first,
+        ),
+        benchmark(
+            "list_proposals_cursor_mid_100",
+            "read_only",
+            0,
+            scenario_list_proposals_cursor_mid,
+        ),
+        benchmark(
+            "list_proposals_cursor_last_100",
+            "read_only",
+            0,
+            scenario_list_proposals_cursor_last,
+        ),
+        benchmark(
+            "list_vesting_offset_first_100",
+            "read_only",
+            0,
+            scenario_list_vesting_offset_first,
+        ),
+        benchmark(
+            "list_vesting_offset_mid_100",
+            "read_only",
+            0,
+            scenario_list_vesting_offset_mid,
+        ),
+        benchmark(
+            "list_vesting_offset_last_100",
+            "read_only",
+            0,
+            scenario_list_vesting_offset_last,
+        ),
+        benchmark(
+            "list_vesting_cursor_first_100",
+            "read_only",
+            0,
+            scenario_list_vesting_cursor_first,
+        ),
+        benchmark(
+            "list_vesting_cursor_mid_100",
+            "read_only",
+            0,
+            scenario_list_vesting_cursor_mid,
+        ),
+        benchmark(
+            "list_vesting_cursor_last_100",
+            "read_only",
+            0,
+            scenario_list_vesting_cursor_last,
+        ),
+        benchmark(
+            "list_recurring_offset_first_100",
+            "read_only",
+            0,
+            scenario_list_recurring_offset_first,
+        ),
+        benchmark(
+            "list_recurring_offset_mid_100",
+            "read_only",
+            0,
+            scenario_list_recurring_offset_mid,
+        ),
+        benchmark(
+            "list_recurring_offset_last_100",
+            "read_only",
+            0,
+            scenario_list_recurring_offset_last,
+        ),
+        benchmark(
+            "list_recurring_cursor_first_100",
+            "read_only",
+            0,
+            scenario_list_recurring_cursor_first,
+        ),
+        benchmark(
+            "list_recurring_cursor_mid_100",
+            "read_only",
+            0,
+            scenario_list_recurring_cursor_mid,
+        ),
+        benchmark(
+            "list_recurring_cursor_last_100",
+            "read_only",
+            0,
+            scenario_list_recurring_cursor_last,
+        ),
+        benchmark(
+            "executable_paginated_first_100",
+            "read_only",
+            0,
+            scenario_executable_paginated_first,
+        ),
+        benchmark(
+            "executable_paginated_mid_100",
+            "read_only",
+            0,
+            scenario_executable_paginated_mid,
+        ),
+        benchmark(
+            "executable_paginated_last_100",
+            "read_only",
+            0,
+            scenario_executable_paginated_last,
+        ),
     ];
 
     let commit = std::env::var("GITHUB_SHA").unwrap_or_else(|_| "local".to_string());

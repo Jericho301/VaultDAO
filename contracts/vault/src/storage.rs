@@ -219,6 +219,8 @@ pub enum DataKey {
     ForceRotationReq(u64),
     /// Next force-rotation request ID -> u64
     NextForceRotationId,
+    /// Addresses that have voted to reject a proposal -> Vec<Address>
+    RejectionVotes(u64),
 }
 
 #[contracttype(export = false)]
@@ -402,8 +404,12 @@ pub enum FeatureKey {
     // ---- Dead letter queue helpers ----
     /// Dead letter record by ID -> DeadLetterRecord
     DeadLetter(u64),
-    /// Dead letter count -> u64
+    /// Lifetime dead letter count -> u64
     DeadLetterCount,
+    /// Live (unprocessed) dead letter count -> u64
+    DeadLetterLiveCount,
+    /// Configurable cap on live dead letter entries -> u64
+    DeadLetterCap,
     /// Vault pause state -> PauseState
     PauseState,
     /// Emergency signers list -> Vec<Address>
@@ -456,6 +462,8 @@ pub enum FeatureKey {
     KeeperHooks(u32),
     /// Total keeper hook count across all event types -> u32
     KeeperHookCount,
+    /// Number of rejection votes required to reject a proposal -> u32
+    RejectionThreshold,
 }
 
 /// TTL constants (in ledgers, ~5 seconds each)
@@ -500,6 +508,66 @@ pub fn get_full_quorum_threshold(env: &Env) -> i128 {
         .get::<_, Config>(&DataKey::Config)
         .map(|config| config.full_quorum_threshold)
         .unwrap_or(0)
+}
+
+// ============================================================================
+// Proposal Rejection Votes
+// ============================================================================
+
+/// Default number of rejection votes required to reject a proposal.
+pub const DEFAULT_REJECTION_THRESHOLD: u32 = 1;
+
+/// Addresses that have voted to reject `proposal_id`, in vote order.
+pub fn get_rejection_votes(env: &Env, proposal_id: u64) -> Vec<Address> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::RejectionVotes(proposal_id))
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+/// Persist the rejection-vote list for `proposal_id`.
+pub fn set_rejection_votes(env: &Env, proposal_id: u64, votes: &Vec<Address>) {
+    let key = DataKey::RejectionVotes(proposal_id);
+    env.storage().persistent().set(&key, votes);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, PROPOSAL_TTL / 2, PROPOSAL_TTL);
+}
+
+/// Record `voter`'s rejection vote for `proposal_id`.
+///
+/// Returns `true` if the vote was newly recorded, `false` if the address had
+/// already voted to reject this proposal.
+pub fn add_rejection_vote(env: &Env, proposal_id: u64, voter: &Address) -> bool {
+    let mut votes = get_rejection_votes(env, proposal_id);
+    if votes.contains(voter) {
+        return false;
+    }
+    votes.push_back(voter.clone());
+    set_rejection_votes(env, proposal_id, &votes);
+    true
+}
+
+/// Remove any stored rejection votes for `proposal_id`.
+pub fn clear_rejection_votes(env: &Env, proposal_id: u64) {
+    env.storage()
+        .persistent()
+        .remove(&DataKey::RejectionVotes(proposal_id));
+}
+
+/// Configured number of rejection votes needed to reject a proposal.
+pub fn get_rejection_threshold(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&FeatureKey::RejectionThreshold)
+        .unwrap_or(DEFAULT_REJECTION_THRESHOLD)
+}
+
+/// Set the number of rejection votes needed to reject a proposal.
+pub fn set_rejection_threshold(env: &Env, threshold: u32) {
+    env.storage()
+        .instance()
+        .set(&FeatureKey::RejectionThreshold, &threshold);
 }
 
 // ============================================================================
@@ -596,6 +664,54 @@ pub fn get_vesting_ids_paginated(env: &Env, offset: u64, limit: u64) -> Vec<u64>
         }
         if skipped < offset {
             skipped += 1;
+            continue;
+        }
+        ids.push_back(id);
+        if ids.len() as u64 >= cap {
+            break;
+        }
+    }
+    ids
+}
+
+/// One page of vesting schedule IDs in ascending ID order, starting strictly
+/// after `start_after_id` (#1744).
+///
+/// Cursor-based counterpart to `get_vesting_ids_paginated`; pass the last ID
+/// received (or 0 to start from the beginning).
+pub fn get_vesting_ids_after(env: &Env, start_after_id: u64, limit: u64) -> Vec<u64> {
+    let cap: u64 = if limit == 0 || limit > 100 { 100 } else { limit };
+    // Read the counter without consuming it: `next_vesting_id` increments.
+    let next_id: u64 = env.storage().instance().get(&VestingKey::NextId).unwrap_or(1);
+    let mut ids: Vec<u64> = Vec::new(env);
+
+    let start = start_after_id.saturating_add(1);
+/// Cursor-based pagination over vesting schedule IDs.
+///
+/// Seeks directly to the position of `start_after_id` (or the first position
+/// whose ID is greater) using the dense index, then returns up to `limit`
+/// existing schedule IDs in ascending order.
+///
+/// # Arguments
+/// * `start_after_id` - Return IDs strictly greater than this value. Pass 0
+///   to start from the beginning.
+/// * `limit` - Maximum number of IDs to return. Capped at 100 internally.
+pub fn get_vesting_ids_after(env: &Env, start_after_id: u64, limit: u64) -> Vec<u64> {
+    let cap: u64 = if limit == 0 || limit > 100 { 100 } else { limit };
+    let next_id: u64 = env.storage().instance().get(&VestingKey::NextId).unwrap_or(1);
+    let mut ids: Vec<u64> = Vec::new(env);
+
+    // Seek to the first position whose ID is greater than `start_after_id`.
+    let start = if start_after_id == 0 {
+        1
+    } else if start_after_id < next_id {
+        start_after_id + 1
+    } else {
+        return ids;
+    };
+
+    for id in start..next_id {
+        if !env.storage().persistent().has(&VestingKey::Schedule(id)) {
             continue;
         }
         ids.push_back(id);
@@ -957,6 +1073,194 @@ pub fn get_proposal_ids_paginated(env: &Env, offset: u64, limit: u64) -> Vec<u64
     ids
 }
 
+/// Return a page of existing proposal IDs in ascending creation order,
+/// starting strictly after `start_after_id`.
+///
+/// This is the cursor-based counterpart to `get_proposal_ids_paginated`:
+/// callers pass the last ID they received (or 0 to start from the
+/// beginning) and receive the next `limit` IDs. Cursor pagination is
+/// stable under concurrent inserts, unlike offset pagination.
+///
+/// # Arguments
+/// * `start_after_id` - Return IDs strictly greater than this value (0 = from start).
+/// * `limit`          - Maximum number of IDs to return. Capped at 100 internally.
+///
+/// # Returns
+/// A vector of proposal IDs in ascending order.
+pub fn get_proposal_ids_after(env: &Env, start_after_id: u64, limit: u64) -> Vec<u64> {
+    let cap: u64 = if limit > 100 { 100 } else { limit };
+    let next_id = get_next_proposal_id(env);
+    let mut ids: Vec<u64> = Vec::new(env);
+
+    let start = start_after_id.saturating_add(1);
+/// Binary-search the dense proposal ID index for `id`.
+///
+/// IDs are assigned sequentially starting at 1, so the dense index is the
+/// contiguous range `[1, next_id)`. Returns the 0-based position of `id`
+/// within that range, or `None` if `id` is out of range.
+pub fn find_position_of_id(env: &Env, id: u64) -> Option<u64> {
+    let next_id = get_next_proposal_id(env);
+    if id == 0 || id >= next_id {
+        return None;
+    }
+    // Dense index: position of `id` is `id - 1`.
+    Some(id - 1)
+}
+
+/// Cursor-based pagination over proposal IDs.
+///
+/// Seeks directly to the position of `start_after_id` (or the first position
+/// whose ID is greater) using the dense index, then returns up to `limit`
+/// existing proposal IDs in ascending order.
+///
+/// # Arguments
+/// * `start_after_id` - Return IDs strictly greater than this value. Pass 0
+///   to start from the beginning.
+/// * `limit` - Maximum number of IDs to return. Capped at 100 internally.
+pub fn get_proposal_ids_after(env: &Env, start_after_id: u64, limit: u64) -> Vec<u64> {
+    let cap: u64 = if limit == 0 || limit > 100 { 100 } else { limit };
+    let next_id = get_next_proposal_id(env);
+    let mut ids: Vec<u64> = Vec::new(env);
+
+    // Seek to the first position whose ID is greater than `start_after_id`.
+    let start = match find_position_of_id(env, start_after_id) {
+        Some(pos) => pos + 2, // position is 0-based; ID = pos + 1; next ID = pos + 2
+        None => {
+            if start_after_id == 0 {
+                1
+            } else {
+                // Out of range: nothing greater exists.
+                return ids;
+            }
+        }
+    };
+
+    for id in start..next_id {
+        if !env.storage().persistent().has(&DataKey::Proposal(id)) {
+            continue;
+        }
+        ids.push_back(id);
+        if ids.len() as u64 >= cap {
+            break;
+        }
+    }
+    ids
+}
+
+// ============================================================================
+// Pending Expiry Index
+// ============================================================================
+
+/// Insert `proposal_id` into the sorted pending-expiry index keyed by `expiry`.
+///
+/// The index is a `Vec<(u64, u64)>` of `(expiry_ledger, proposal_id)` pairs kept
+/// in ascending order of `expiry_ledger`, so the front of the vector always
+/// holds the soonest-expiring proposal. Insertion is idempotent: re-inserting
+/// the same `(expiry, proposal_id)` pair is a no-op.
+pub fn pending_expiry_index_insert(env: &Env, expiry: u64, proposal_id: u64) {
+    let mut index: Vec<(u64, u64)> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::PendingExpiryIndex)
+        .unwrap_or_else(|| Vec::new(env));
+
+    // Idempotency: skip if this exact pair is already present.
+    for entry in index.iter() {
+        if entry == (expiry, proposal_id) {
+            return;
+        }
+    }
+
+    // Find the first position whose expiry is strictly greater than `expiry`,
+    // preserving insertion order among equal expiries.
+    let mut pos: u32 = index.len();
+    for i in 0..index.len() {
+        if let Some((e, _)) = index.get(i) {
+            if e > expiry {
+                pos = i;
+                break;
+            }
+        }
+    }
+
+    // Rebuild the vector with the new entry spliced in at `pos`.
+    let mut updated: Vec<(u64, u64)> = Vec::new(env);
+    for i in 0..index.len() {
+        if i == pos {
+            updated.push_back((expiry, proposal_id));
+        }
+        if let Some(entry) = index.get(i) {
+            updated.push_back(entry);
+        }
+    }
+    if pos >= index.len() {
+        updated.push_back((expiry, proposal_id));
+    }
+
+    env.storage()
+        .persistent()
+        .set(&DataKey::PendingExpiryIndex, &updated);
+    env.storage().persistent().extend_ttl(
+        &DataKey::PendingExpiryIndex,
+        PROPOSAL_TTL / 2,
+        PROPOSAL_TTL,
+    );
+}
+
+/// Remove every entry for `proposal_id` from the pending-expiry index.
+pub fn pending_expiry_index_remove(env: &Env, proposal_id: u64) {
+    let index: Vec<(u64, u64)> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::PendingExpiryIndex)
+        .unwrap_or_else(|| Vec::new(env));
+
+    let mut updated: Vec<(u64, u64)> = Vec::new(env);
+    for entry in index.iter() {
+        if entry.1 != proposal_id {
+            updated.push_back(entry);
+        }
+    }
+
+    env.storage()
+        .persistent()
+        .set(&DataKey::PendingExpiryIndex, &updated);
+    if !updated.is_empty() {
+        env.storage().persistent().extend_ttl(
+            &DataKey::PendingExpiryIndex,
+            PROPOSAL_TTL / 2,
+            PROPOSAL_TTL,
+        );
+    }
+}
+
+/// Return up to `max_scan` proposal IDs whose expiry is at or before
+/// `current_ledger`, taken from the front of the sorted index.
+///
+/// The index is sorted ascending by expiry, so scanning stops at the first
+/// entry that is not yet due. Entries are returned in expiry order; the index
+/// itself is not mutated (callers prune via `pending_expiry_index_remove`).
+pub fn pending_expiry_index_due_prefix(env: &Env, current_ledger: u64, max_scan: u32) -> Vec<u64> {
+    let index: Vec<(u64, u64)> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::PendingExpiryIndex)
+        .unwrap_or_else(|| Vec::new(env));
+
+    let mut due: Vec<u64> = Vec::new(env);
+    for entry in index.iter() {
+        if due.len() >= max_scan {
+            break;
+        }
+        let (expiry, proposal_id) = entry;
+        if expiry > current_ledger {
+            break;
+        }
+        due.push_back(proposal_id);
+    }
+    due
+}
+
 // ============================================================================
 // TimelockReady Index  (Issue #1640)
 // ============================================================================
@@ -1295,6 +1599,60 @@ pub fn get_recurring_payment_ids_paginated(env: &Env, offset: u64, limit: u64) -
         }
         if skipped < offset {
             skipped += 1;
+            continue;
+        }
+        ids.push_back(id);
+        if ids.len() as u64 >= cap {
+            break;
+        }
+    }
+    ids
+}
+
+/// Return a page of existing recurring payment IDs in ascending creation
+/// order, starting strictly after `start_after_id`.
+///
+/// Cursor-based counterpart to `get_recurring_payment_ids_paginated`; pass the
+/// last ID received (or 0 to start from the beginning).
+///
+/// # Arguments
+/// * `start_after_id` - Return IDs strictly greater than this value (0 = from start).
+/// * `limit`          - Maximum number of IDs to return. Capped at 100 internally.
+///
+/// # Returns
+/// A vector of recurring payment IDs in ascending order.
+pub fn get_recurring_payment_ids_after(env: &Env, start_after_id: u64, limit: u64) -> Vec<u64> {
+    let cap: u64 = if limit > 100 { 100 } else { limit };
+    let next_id = get_next_recurring_id(env);
+    let mut ids: Vec<u64> = Vec::new(env);
+
+    let start = start_after_id.saturating_add(1);
+/// Cursor-based pagination over recurring payment IDs.
+///
+/// Seeks directly to the position of `start_after_id` (or the first position
+/// whose ID is greater) using the dense index, then returns up to `limit`
+/// existing recurring payment IDs in ascending order.
+///
+/// # Arguments
+/// * `start_after_id` - Return IDs strictly greater than this value. Pass 0
+///   to start from the beginning.
+/// * `limit` - Maximum number of IDs to return. Capped at 100 internally.
+pub fn get_recurring_payment_ids_after(env: &Env, start_after_id: u64, limit: u64) -> Vec<u64> {
+    let cap: u64 = if limit == 0 || limit > 100 { 100 } else { limit };
+    let next_id = get_next_recurring_id(env);
+    let mut ids: Vec<u64> = Vec::new(env);
+
+    // Seek to the first position whose ID is greater than `start_after_id`.
+    let start = if start_after_id == 0 {
+        1
+    } else if start_after_id < next_id {
+        start_after_id + 1
+    } else {
+        return ids;
+    };
+
+    for id in start..next_id {
+        if !env.storage().persistent().has(&DataKey::Recurring(id)) {
             continue;
         }
         ids.push_back(id);
@@ -1878,6 +2236,55 @@ pub fn refund_spending_limits(env: &Env, amount: i128, spend_day: u64, spend_wee
     // preventing double-refund if two cancellations land in the same ledger.
     try_deduct_daily_spent(env, spend_day, amount);
     try_deduct_weekly_spent(env, spend_week, amount);
+}
+
+/// Commit a proposal's reserved spend from the pending counters into the
+/// executed counters.
+///
+/// On successful execution the amount that was reserved against the pending
+/// daily/weekly (and per-token) buckets must be moved into the executed
+/// buckets so that reporting reflects actual spend, while the pending
+/// counters are decremented by the same amount.
+///
+/// The pending counters are decremented using the atomic `try_deduct_*`
+/// helpers so they can never underflow, and the executed counters are
+/// credited via the corresponding `add_*` helpers.
+pub fn commit_pending_to_executed(env: &Env, proposal: &Proposal) {
+    let amount = proposal.amount;
+    if amount <= 0 {
+        return;
+    }
+
+    let spend_day = proposal.spend_day;
+    let spend_week = proposal.spend_week;
+
+    // Move global daily/weekly pending spend into executed spend.
+    try_deduct_daily_spent(env, spend_day, amount);
+    try_deduct_weekly_spent(env, spend_week, amount);
+    add_daily_spent(env, spend_day, amount);
+    add_weekly_spent(env, spend_week, amount);
+
+    // Move per-token pending spend into executed spend when a token is set.
+    if let Some(token) = proposal.token.clone() {
+        let current_daily = get_token_daily_spent(env, &token, spend_day);
+        let refunded_daily = current_daily.saturating_sub(amount).max(0);
+        let key_daily = DataKey::TokenDailySpent(token.clone(), spend_day);
+        env.storage().temporary().set(&key_daily, &refunded_daily);
+        env.storage()
+            .temporary()
+            .extend_ttl(&key_daily, DAY_IN_LEDGERS * 2, DAY_IN_LEDGERS * 2);
+
+        let current_weekly = get_token_weekly_spent(env, &token, spend_week);
+        let refunded_weekly = current_weekly.saturating_sub(amount).max(0);
+        let key_weekly = DataKey::TokenWeeklySpent(token.clone(), spend_week);
+        env.storage().temporary().set(&key_weekly, &refunded_weekly);
+        env.storage()
+            .temporary()
+            .extend_ttl(&key_weekly, DAY_IN_LEDGERS * 14, DAY_IN_LEDGERS * 14);
+
+        add_token_daily_spent(env, &token, spend_day, amount);
+        add_token_weekly_spent(env, &token, spend_week, amount);
+    }
 }
 // ============================================================================
 // Comments
@@ -2958,6 +3365,11 @@ pub fn set_dead_letter(env: &Env, record: &DeadLetterRecord) {
         .extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL);
 }
 
+/// Default maximum number of live (unprocessed) dead-letter entries.
+pub const DEAD_LETTER_CAP: u64 = 50;
+
+/// Lifetime counter of dead letters ever enqueued (kept for backward
+/// compatibility; not used for cap enforcement).
 pub fn get_dead_letter_count(env: &Env) -> u64 {
     env.storage()
         .persistent()
@@ -2971,6 +3383,55 @@ pub fn increment_dead_letter_count(env: &Env) -> u64 {
         .persistent()
         .set(&FeatureKey::DeadLetterCount, &count);
     count
+}
+
+/// Number of dead-letter entries currently awaiting processing.
+pub fn get_dead_letter_live_count(env: &Env) -> u64 {
+    env.storage()
+        .persistent()
+        .get(&FeatureKey::DeadLetterLiveCount)
+        .unwrap_or(0)
+}
+
+pub fn increment_dead_letter_live_count(env: &Env) -> u64 {
+    let count = get_dead_letter_live_count(env) + 1;
+    env.storage()
+        .persistent()
+        .set(&FeatureKey::DeadLetterLiveCount, &count);
+    count
+}
+
+pub fn decrement_dead_letter_live_count(env: &Env) {
+    let count = get_dead_letter_live_count(env).saturating_sub(1);
+    env.storage()
+        .persistent()
+        .set(&FeatureKey::DeadLetterLiveCount, &count);
+}
+
+/// Remove a dead-letter entry and decrement the live count.
+pub fn remove_dead_letter(env: &Env, id: u64) {
+    if env
+        .storage()
+        .persistent()
+        .has(&FeatureKey::DeadLetter(id))
+    {
+        env.storage()
+            .persistent()
+            .remove(&FeatureKey::DeadLetter(id));
+        decrement_dead_letter_live_count(env);
+    }
+}
+
+/// Configured cap on live dead-letter entries.
+pub fn get_dead_letter_cap(env: &Env) -> u64 {
+    env.storage()
+        .instance()
+        .get(&FeatureKey::DeadLetterCap)
+        .unwrap_or(DEAD_LETTER_CAP)
+}
+
+pub fn set_dead_letter_cap(env: &Env, cap: u64) {
+    env.storage().instance().set(&FeatureKey::DeadLetterCap, &cap);
 }
 
 // ============================================================================

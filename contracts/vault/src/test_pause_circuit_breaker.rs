@@ -231,6 +231,53 @@ fn test_configure_emergency_min_two_signers() {
     assert_eq!(r, Err(Ok(VaultError::NoSigners)));
 }
 
+// ── Test 9a: All vote entry points blocked while paused ──────────────────
+
+#[test]
+fn test_all_vote_entry_points_blocked_while_paused() {
+    let (env, client) = make_env();
+    let (admin, treasurer, em1, em2) = setup_with_emergency(&env, &client);
+    let recipient = Address::generate(&env);
+    let token = Address::generate(&env);
+
+    let pid = client.propose_transfer(
+        &treasurer,
+        &recipient,
+        &token,
+        &1000i128,
+        &Symbol::new(&env, "t"),
+        &Priority::Normal,
+        &Vec::new(&env),
+        &ConditionLogic::And,
+        &0i128,
+    );
+
+    client.pause_vault(&em1, &Symbol::new(&env, "manual"));
+
+    // approve_proposal
+    let r = client.try_approve_proposal(&admin, &pid);
+    assert_eq!(r, Err(Ok(VaultError::VaultPaused)));
+
+    // abstain_proposal
+    let r = client.try_abstain_proposal(&admin, &pid);
+    assert_eq!(r, Err(Ok(VaultError::VaultPaused)));
+
+    // reject_proposal
+    let r = client.try_reject_proposal(&admin, &pid);
+    assert_eq!(r, Err(Ok(VaultError::VaultPaused)));
+
+    // change_vote
+    let r = client.try_change_vote(&admin, &pid, &Vote::Approve);
+    assert_eq!(r, Err(Ok(VaultError::VaultPaused)));
+
+    // Unpause and verify the entry points are restored
+    client.unpause_vault(&em2);
+    assert!(!client.get_pause_state().is_paused);
+
+    let r = client.try_approve_proposal(&admin, &pid);
+    assert!(r.is_ok(), "approve_proposal should succeed after unpause");
+}
+
 // ── Test 9: Approve proposal blocked while paused ────────────────────────
 
 #[test]
