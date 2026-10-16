@@ -960,6 +960,92 @@ fn test_time_based_threshold_respects_quorum() {
 }
 
 // ===========================================================================
+// Deadline Rejection — Spent Amount Preservation Tests
+//
+// **Validates: Requirements 1.1, 1.2**
+//
+// When a vote is rejected because the voting deadline has passed, the
+// proposal must not consume any spending budget.  `get_today_spent` and the
+// per-token spent value must return to their pre-creation values.
+// ===========================================================================
+
+/// Read the vault's current daily spent total.
+fn today_spent(client: &VaultDAOClient<'_>) -> i128 {
+    client.get_today_spent()
+}
+
+/// Read the vault's per-token spent value for `token`.
+fn token_spent(client: &VaultDAOClient<'_>, token: &Address) -> i128 {
+    client.get_token_spent(token)
+}
+
+// ---------------------------------------------------------------------------
+// Test D-1 — approve_proposal after deadline leaves spent values unchanged
+// ---------------------------------------------------------------------------
+#[test]
+fn test_approve_after_deadline_preserves_spent() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, signer, proposal_id) = setup_vault_with_deadline_proposal(&env, 1000, 10);
+
+    let before_today = today_spent(&client);
+    let token = client.get_proposal(&proposal_id).token.clone();
+    let before_token = token_spent(&client, &token);
+
+    // Advance ledger past the deadline: 1011 > 1010
+    env.ledger().set_sequence_number(1011);
+
+    let result = client.try_approve_proposal(&signer, &proposal_id);
+    assert!(
+        result.is_ok(),
+        "approve_proposal after deadline must return Ok(())"
+    );
+
+    assert_eq!(
+        today_spent(&client),
+        before_today,
+        "get_today_spent must be unchanged after a deadline-rejected approval"
+    );
+    assert_eq!(
+        token_spent(&client, &token),
+        before_token,
+        "per-token spent must be unchanged after a deadline-rejected approval"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test D-2 — abstain_proposal after deadline leaves spent values unchanged
+// ---------------------------------------------------------------------------
+#[test]
+fn test_abstain_after_deadline_preserves_spent() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, signer, proposal_id) = setup_vault_with_deadline_proposal(&env, 1000, 10);
+
+    let before_today = today_spent(&client);
+    let token = client.get_proposal(&proposal_id).token.clone();
+    let before_token = token_spent(&client, &token);
+
+    // Advance ledger past the deadline: 1011 > 1010
+    env.ledger().set_sequence_number(1011);
+
+    let result = client.try_abstain_proposal(&signer, &proposal_id);
+    assert!(
+        result.is_ok(),
+        "abstain_proposal after deadline must return Ok(())"
+    );
+
+    assert_eq!(
+        today_spent(&client),
+        before_today,
+        "get_today_spent must be unchanged after a deadline-rejected abstention"
+    );
+    assert_eq!(
+        token_spent(&client, &token),
+        before_token,
+        "per-token spent must be unchanged after a deadline-rejected abstention"
 // change_vote Deadline Tests
 //
 // **Validates: Requirements 1.1, 1.2, 3.1**
