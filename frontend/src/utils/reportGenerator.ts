@@ -215,7 +215,7 @@ export function exportToCSV(entries: AuditEntry[]): Blob {
   
   const csvContent = [
     headers.join(','),
-    ...rows.map(row => row.map(cell => `"${cell}"`).join(',')),
+    ...rows.map(row => row.map(cell => `"${String(cell).replace(/"/g, '""')}"`).join(',')),
   ].join('\n');
   
   return new Blob([csvContent], { type: 'text/csv' });
