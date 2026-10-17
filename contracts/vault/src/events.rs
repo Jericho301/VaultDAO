@@ -1338,6 +1338,15 @@ pub fn emit_recovery_cancelled(env: &Env, proposal_id: u64, canceller: &Address)
     );
 }
 
+/// Emit when a guardian casts a cancel vote that does not yet cancel the
+/// recovery (Issue #1936). The proposal stays Approved.
+pub fn emit_recovery_cancel_voted(env: &Env, proposal_id: u64, guardian: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "recovery_cancel_voted"), proposal_id),
+        guardian.clone(),
+    );
+}
+
 /// Emit when a funding round is completed
 pub fn emit_funding_round_completed(env: &Env, round_id: u64, total_released: i128) {
     env.events().publish(

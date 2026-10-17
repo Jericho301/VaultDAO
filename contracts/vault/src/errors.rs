@@ -517,6 +517,9 @@ pub enum VaultError {
     // Issue #1935: signer set size limit
     /// Signer list exceeds `MAX_SIGNERS`
     TooManySigners = 1166,
+    // Issue #1936: cancel votes are separate from approvals
+    /// Guardian has already cast a cancel vote on this recovery
+    AlreadyCancelVoted = 1167,
     // Issue #1748: Storage schema versioning
     /// Stored schema version does not match this contract build; call `migrate`
     SchemaVersionMismatch = 1140,

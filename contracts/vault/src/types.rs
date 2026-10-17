@@ -1857,6 +1857,8 @@ pub struct RecoveryProposal {
     pub new_threshold: u32,
     /// Guardians who have approved this proposal
     pub approvals: Vec<Address>,
+    /// Guardians who have voted to cancel an Approved proposal (Issue #1936)
+    pub cancel_votes: Vec<Address>,
     /// Current status
     pub status: RecoveryStatus,
     /// Ledger when the proposal was created

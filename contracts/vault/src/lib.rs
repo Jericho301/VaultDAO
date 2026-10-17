@@ -487,6 +487,8 @@ mod test_recovery_competing;
 #[cfg(test)]
 mod test_recovery_signer_validation;
 #[cfg(test)]
+mod test_recovery_cancel_votes;
+#[cfg(test)]
 mod test_recurring;
 #[cfg(test)]
 mod test_reentrancy;
@@ -14589,6 +14591,7 @@ impl VaultDAO {
             new_signers,
             new_threshold,
             approvals: Vec::new(&env),
+            cancel_votes: Vec::new(&env),
             status: RecoveryStatus::Pending,
             created_at: current_ledger,
             execution_after: 0, // Set after approval threshold is met
@@ -14924,28 +14927,25 @@ impl VaultDAO {
             return Err(VaultError::ProposalNotPending);
         }
 
-        // For an approved recovery, require guardian quorum to cancel
+        // For an approved recovery, cancellation needs a guardian quorum.
+        // Cancel votes live in their own list (Issue #1936), so an approver
+        // may still cancel and a partial quorum does not cancel the proposal.
         if proposal.status == RecoveryStatus::Approved {
-            // Check if this guardian has already voted to cancel
-            // We reuse the approvals vector to track cancel votes
-            if proposal.approvals.contains(&guardian) {
-                return Err(VaultError::AlreadyApproved);
+            if proposal.cancel_votes.contains(&guardian) {
+                return Err(VaultError::AlreadyCancelVoted);
             }
 
-            proposal.approvals.push_back(guardian.clone());
+            proposal.cancel_votes.push_back(guardian.clone());
 
-            // Require threshold of guardians to approve the cancellation
-            if proposal.approvals.len() >= config.recovery_config.threshold {
+            if proposal.cancel_votes.len() >= config.recovery_config.threshold {
                 proposal.status = RecoveryStatus::Cancelled;
                 storage::set_recovery_proposal(&env, &proposal);
                 events::emit_recovery_cancelled(&env, proposal_id, &guardian);
-                Ok(())
             } else {
-                // Store the partial cancellation votes
                 storage::set_recovery_proposal(&env, &proposal);
-                events::emit_recovery_cancelled(&env, proposal_id, &guardian);
-                Ok(())
+                events::emit_recovery_cancel_voted(&env, proposal_id, &guardian);
             }
+            Ok(())
         } else {
             // For pending recoveries, a single guardian can cancel
             proposal.status = RecoveryStatus::Cancelled;
