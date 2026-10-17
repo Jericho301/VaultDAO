@@ -153,8 +153,44 @@ fn test_claimed_tokens_are_kept_by_recipient() {
     let refunded = f.client.cancel_stream(&f.admin, &f.stream_id);
 
     assert_eq!(refunded, TOTAL - 300 * RATE);
-    assert_eq!(f.token.balance(&f.recipient), 200 * RATE);
+    assert_eq!(f.token.balance(&f.recipient), 300 * RATE);
     assert_eq!(f.token.balance(&f.sender), TOTAL - 300 * RATE);
+}
+
+#[test]
+fn test_cancel_pays_recipient_accrued_but_unclaimed() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let f = setup(&env);
+
+    advance(&env, 300);
+    f.client.cancel_stream(&f.sender, &f.stream_id);
+
+    // Accrued since the last claim goes to the recipient, not the vault
+    assert_eq!(f.token.balance(&f.recipient), 300 * RATE);
+    assert_eq!(f.token.balance(&f.sender), TOTAL - 300 * RATE);
+    assert_eq!(f.token.balance(&f.client.address), 0);
+}
+
+#[test]
+fn test_cancel_accounting_invariant_holds() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let f = setup(&env);
+
+    advance(&env, 300);
+    f.client.claim_stream(&f.recipient, &f.stream_id);
+    advance(&env, 250);
+
+    let refunded = f.client.cancel_stream(&f.sender, &f.stream_id);
+    let stream = f.client.get_stream(&f.stream_id);
+    let paid_to_recipient = f.token.balance(&f.recipient);
+
+    // refund + recipient payout + claimed == total, and nothing stays in the vault
+    assert_eq!(refunded + paid_to_recipient, TOTAL);
+    assert_eq!(stream.claimed_amount, paid_to_recipient);
+    assert_eq!(refunded + stream.claimed_amount, TOTAL);
+    assert_eq!(f.token.balance(&f.client.address), 0);
 }
 
 #[test]

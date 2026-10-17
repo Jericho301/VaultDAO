@@ -7874,8 +7874,24 @@ impl VaultDAO {
             gross_earned
         };
 
-        // Refund = total committed ? everything earned (claimed + unclaimed earned)
+        // Earned by recipient but not yet claimed: paid out now so accrued
+        // funds are never lost to a cancellation.
+        let unclaimed_earned = (gross_earned - stream.claimed_amount).max(0);
+
+        // Refund = total committed - everything earned (claimed + unclaimed earned)
         let refund_amount = stream.total_amount - gross_earned;
+
+        if unclaimed_earned > 0
+            && token::try_transfer(
+                &env,
+                &stream.token_addr,
+                &stream.recipient,
+                unclaimed_earned,
+            )
+            .is_err()
+        {
+            return Err(VaultError::InsufficientBalance);
+        }
 
         if refund_amount > 0
             && token::try_transfer(&env, &stream.token_addr, &stream.sender, refund_amount).is_err()
@@ -7889,6 +7905,7 @@ impl VaultDAO {
             &stream.token_addr,
             stream.total_amount - stream.claimed_amount,
         );
+        stream.claimed_amount += unclaimed_earned;
         stream.last_update_timestamp = now;
         stream.status = StreamStatus::Cancelled;
 
