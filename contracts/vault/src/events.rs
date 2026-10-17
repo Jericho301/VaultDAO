@@ -2543,13 +2543,6 @@ pub fn emit_vesting_cancelled(
 // Multi-Phase Execution Events
 // ============================================================================
 
-/// Emit when a single phase of a multi-phase proposal execution completes.
-///
-/// Topics: `("phase_executed", proposal_id)`
-/// Data:   `(phase_index, executor, ledger)`
-// Phase Execution Events
-// ============================================================================
-
 /// Emit when a proposal phase executes successfully.
 ///
 /// Topics: `("phase_executed", proposal_id)`
@@ -2564,19 +2557,6 @@ pub fn emit_phase_executed(
     env.events().publish(
         (Symbol::new(env, "phase_executed"), proposal_id),
         (phase_index, executor.clone(), ledger),
-    );
-}
-
-/// Emit when a phase of a multi-phase proposal execution fails.
-///
-/// Topics: `("phase_failed", proposal_id)`
-/// Data:   `(phase_index, executor, error_code)`
-    status: u32,
-    error_code: u32,
-) {
-    env.events().publish(
-        (Symbol::new(env, "phase_executed"), proposal_id),
-        (phase_index, status, error_code),
     );
 }
 
@@ -2595,7 +2575,6 @@ pub fn emit_phase_failed(
     env.events().publish(
         (Symbol::new(env, "phase_failed"), proposal_id),
         (phase_index, executor.clone(), error_code),
-        (phase_index, status, error_code),
     );
 }
 
