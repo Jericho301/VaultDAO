@@ -32,8 +32,8 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
-      # Utilizes the builder stage for development or builds runner for production
-      target: runner
+      # dev installs devDependencies (tsx) for hot reload; use runner for production images
+      target: dev
     container_name: vaultdao-backend
     # Mount local .env optionally; if missing, falls back to env vars below (per backend/.env.example)
     env_file:

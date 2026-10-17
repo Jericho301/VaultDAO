@@ -18,6 +18,23 @@ RUN npm run build
 # Prune node_modules to retain only production dependencies
 RUN npm prune --omit=dev
 
+# Development stage: full dependencies and tsx for hot reload via docker-compose
+FROM node:22-alpine AS dev
+
+WORKDIR /app
+
+# curl is needed for the docker-compose healthcheck
+RUN apk add --no-cache curl
+
+COPY package.json package-lock.json ./
+RUN npm ci
+
+COPY . .
+
+EXPOSE 8787
+
+CMD ["npm", "run", "dev"]
+
 # Runtime stage
 FROM node:22-alpine AS runner
 
