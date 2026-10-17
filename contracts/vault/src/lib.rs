@@ -478,6 +478,8 @@ mod test_rbac_consistency;
 #[cfg(test)]
 mod test_recovery_role_revocation;
 #[cfg(test)]
+mod test_recovery_expiry;
+#[cfg(test)]
 mod test_recurring;
 #[cfg(test)]
 mod test_reentrancy;
@@ -4541,6 +4543,7 @@ impl VaultDAO {
                     guardians: Vec::new(&env),
                     threshold: 0,
                     delay: 0,
+                    recovery_ttl_ledgers: 0,
                 },
                 staking_config: StakingConfig::default(),
                 supported_tokens: Vec::new(&env),
@@ -14549,6 +14552,14 @@ impl VaultDAO {
         let id = storage::increment_recovery_id(&env);
         let current_ledger = env.ledger().sequence() as u64;
 
+        // Issue #1933: a zero TTL keeps the historical no-expiry behaviour.
+        let ttl = config.recovery_config.recovery_ttl_ledgers;
+        let expires_at = if ttl == 0 {
+            u64::MAX
+        } else {
+            current_ledger.saturating_add(ttl)
+        };
+
         let proposal = RecoveryProposal {
             id,
             new_signers,
@@ -14557,6 +14568,7 @@ impl VaultDAO {
             status: RecoveryStatus::Pending,
             created_at: current_ledger,
             execution_after: 0, // Set after approval threshold is met
+            expires_at,
         };
 
         storage::set_recovery_proposal(&env, &proposal);
@@ -14581,6 +14593,9 @@ impl VaultDAO {
         let mut proposal = storage::get_recovery_proposal(&env, proposal_id)?;
         if proposal.status != RecoveryStatus::Pending {
             return Err(VaultError::ProposalNotPending);
+        }
+        if Self::recovery_is_expired(&env, &proposal) {
+            return Err(VaultError::ProposalExpired);
         }
 
         if proposal.approvals.contains(&guardian) {
@@ -14754,6 +14769,9 @@ impl VaultDAO {
         if proposal.status != RecoveryStatus::Approved {
             return Err(VaultError::ProposalNotApproved);
         }
+        if Self::recovery_is_expired(&env, &proposal) {
+            return Err(VaultError::ProposalExpired);
+        }
 
         let current_ledger = env.ledger().sequence() as u64;
         if current_ledger < proposal.execution_after {
@@ -14918,8 +14936,24 @@ impl VaultDAO {
     }
 
     /// Get recovery proposal details
+    ///
+    /// A live proposal past its `expires_at` is reported as `Expired`. The
+    /// stored record is not rewritten here because the approve and execute
+    /// paths reject expired proposals, and a failed call reverts its writes.
     pub fn get_recovery_proposal(env: Env, id: u64) -> Result<RecoveryProposal, VaultError> {
-        storage::get_recovery_proposal(&env, id)
+        let mut proposal = storage::get_recovery_proposal(&env, id)?;
+        if Self::recovery_is_expired(&env, &proposal)
+            && (proposal.status == RecoveryStatus::Pending
+                || proposal.status == RecoveryStatus::Approved)
+        {
+            proposal.status = RecoveryStatus::Expired;
+        }
+        Ok(proposal)
+    }
+
+    /// Whether a recovery proposal is past its expiry ledger (Issue #1933).
+    fn recovery_is_expired(env: &Env, proposal: &RecoveryProposal) -> bool {
+        env.ledger().sequence() as u64 > proposal.expires_at
     }
 
     /// Get recovery config change proposal details (Issue #1702)
