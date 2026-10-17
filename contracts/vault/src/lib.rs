@@ -455,6 +455,8 @@ mod test_escrow_creation_validation;
 #[cfg(test)]
 mod test_funding_round_release_accounting;
 #[cfg(test)]
+mod test_funding_milestone_release_once;
+#[cfg(test)]
 mod test_escrow_voting;
 #[cfg(test)]
 mod test_escrows_by_recipient;
@@ -15991,12 +15993,20 @@ impl VaultDAO {
             }
         }
 
+        if round.released_amount.saturating_add(amount) > round.total_amount {
+            return Err(VaultError::InvalidAmount);
+        }
+
+        // Mark the milestone as paid in the same call that transfers, so a second
+        // release of the same milestone is rejected by the status check above.
+        let mut paid_milestone = round.milestones.get(milestone_index).unwrap();
+        paid_milestone.status = FundingMilestoneStatus::Released;
+        paid_milestone.amount = amount;
+        round.milestones.set(milestone_index, paid_milestone);
+
         // Release proportional tranche to recipient
         token::transfer(&env, &round.token, &round.recipient, amount);
         round.released_amount = round.released_amount.saturating_add(amount);
-        if round.released_amount > round.total_amount {
-            return Err(VaultError::InvalidAmount);
-        }
 
         // Auto-complete if all milestones are now verified
         if round.all_milestones_verified() {
