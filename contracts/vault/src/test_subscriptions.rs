@@ -874,3 +874,39 @@ fn test_reactivate_expired_subscription() {
     assert!(reactivated.auto_renew);
     assert_eq!(reactivated.total_payments, 2);
 }
+
+#[test]
+fn test_renew_after_grace_period_persists_expiry() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, _token_admin, token) = setup(&env);
+    let subscriber = Address::generate(&env);
+    let provider = Address::generate(&env);
+
+    fund_subscriber(&env, &token, &subscriber, 100_000);
+
+    let id = client.create_subscription(
+        &subscriber,
+        &provider,
+        &SubscriptionTier::Basic,
+        &token,
+        &100i128,
+        &500u64,
+        &false,
+        &50u64,
+    );
+
+    let sub = client.get_subscription(&id);
+    let advance = sub.next_renewal_ledger + 51 - env.ledger().sequence() as u64;
+    env.ledger()
+        .with_mut(|l| l.sequence_number += advance as u32);
+
+    // Renewal after the grace period expires the subscription and returns Ok.
+    client.renew_subscription(&subscriber, &id);
+
+    let expired = client.get_subscription(&id);
+    assert_eq!(expired.status, SubscriptionStatus::Expired);
+    assert!(!client.get_subscription(&id).auto_renew);
+    assert_eq!(expired.total_payments, 1);
+}

@@ -16874,11 +16874,14 @@ impl VaultDAO {
         // Check if grace period has lapsed ? expire and reject
         let grace_deadline = sub.next_renewal_ledger + sub.grace_period_ledgers;
         if current_ledger > grace_deadline {
+            // Persist the expiry and return Ok: an Err would roll the write back.
+            // No payment is taken; callers must check the status to see the result.
             sub.status = SubscriptionStatus::Expired;
             sub.auto_renew = false;
             storage::set_subscription(&env, &sub);
+            storage::extend_instance_ttl(&env);
             events::emit_subscription_expired(&env, subscription_id);
-            return Err(VaultError::SubscriptionAlreadyExpired);
+            return Ok(());
         }
 
         // Only the subscriber can renew unless auto_renew is enabled.
