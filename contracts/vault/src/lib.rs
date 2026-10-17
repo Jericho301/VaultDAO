@@ -88,6 +88,9 @@ const MAX_TAGS: u32 = 10;
 /// Maximum number of attachments per proposal
 const MAX_ATTACHMENTS: u32 = 10;
 
+/// Maximum number of signers in a signer set (Issue #1935)
+const MAX_SIGNERS: u32 = 20;
+
 /// Minimum admin rotation delay: 1440 ledgers ? 24 hours at 5 s/ledger.
 /// Enforced at both vault initialization and `set_admin_rotation_delay`.
 const MIN_ADMIN_ROTATION_DELAY: u64 = 1_440;
@@ -481,6 +484,8 @@ mod test_recovery_role_revocation;
 mod test_recovery_expiry;
 #[cfg(test)]
 mod test_recovery_competing;
+#[cfg(test)]
+mod test_recovery_signer_validation;
 #[cfg(test)]
 mod test_recurring;
 #[cfg(test)]
@@ -5495,10 +5500,8 @@ impl VaultDAO {
         }
 
         // ── 2. Input validation ──────────────────────────────────────────────
-        // 2a. Non-empty list.
-        if signers.is_empty() {
-            return Err(VaultError::NoSigners);
-        }
+        // 2a. Non-empty, within MAX_SIGNERS, and no duplicate addresses.
+        Self::validate_signer_set(&signers)?;
 
         let current_config = storage::get_config(&env)?;
 
@@ -5506,15 +5509,6 @@ impl VaultDAO {
         //     so the vault remains executable after the change is applied.
         if signers.len() < current_config.threshold {
             return Err(VaultError::ThresholdTooHigh);
-        }
-
-        // 2c. No duplicate addresses in the proposed signer list.
-        for i in 0..signers.len() {
-            for j in (i + 1)..signers.len() {
-                if signers.get(i).unwrap() == signers.get(j).unwrap() {
-                    return Err(VaultError::SignerAlreadyExists);
-                }
-            }
         }
 
         // ── 3. Build the proposed config and route through governance ────────
@@ -6000,6 +5994,27 @@ impl VaultDAO {
     }
 
     /// Validate a Config struct using the same rules as initialize.
+    /// Validate a proposed signer list (Issue #1935).
+    ///
+    /// Rejects an empty list, more than `MAX_SIGNERS` entries, and duplicate
+    /// addresses. Shared by `update_config_signers` and `initiate_recovery`.
+    fn validate_signer_set(signers: &Vec<Address>) -> Result<(), VaultError> {
+        if signers.is_empty() {
+            return Err(VaultError::NoSigners);
+        }
+        if signers.len() > MAX_SIGNERS {
+            return Err(VaultError::TooManySigners);
+        }
+        for i in 0..signers.len() {
+            for j in (i + 1)..signers.len() {
+                if signers.get(i).unwrap() == signers.get(j).unwrap() {
+                    return Err(VaultError::SignerAlreadyExists);
+                }
+            }
+        }
+        Ok(())
+    }
+
     fn validate_config(config: &Config) -> Result<(), VaultError> {
         if config.signers.is_empty() {
             return Err(VaultError::NoSigners);
@@ -14541,9 +14556,7 @@ impl VaultDAO {
         }
 
         // Validate new config
-        if new_signers.is_empty() {
-            return Err(VaultError::NoSigners);
-        }
+        Self::validate_signer_set(&new_signers)?;
         if new_threshold < 1 {
             return Err(VaultError::ThresholdTooHigh);
         }

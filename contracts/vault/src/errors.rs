@@ -514,6 +514,9 @@ pub enum VaultError {
     // Issue #1934: only one recovery proposal may be open at a time
     /// A recovery proposal is already Pending or Approved
     RecoveryAlreadyActive = 1165,
+    // Issue #1935: signer set size limit
+    /// Signer list exceeds `MAX_SIGNERS`
+    TooManySigners = 1166,
     // Issue #1748: Storage schema versioning
     /// Stored schema version does not match this contract build; call `migrate`
     SchemaVersionMismatch = 1140,
