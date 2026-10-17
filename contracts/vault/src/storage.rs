@@ -254,6 +254,8 @@ pub enum VestingKey {
 pub enum ReserveKey {
     ReservedEscrow(Address),
     ReservedStream(Address),
+    /// Tokens held in time-weighted locks, owed back to lockers (#1903)
+    ReservedLocks(Address),
 }
 
 #[contracttype(export = false)]
@@ -746,12 +748,25 @@ pub fn release_stream_reserve(env: &Env, token: &Address, amount: i128) {
     adjust_reserve(env, ReserveKey::ReservedStream(token.clone()), -amount);
 }
 
+pub fn get_reserved_locks(env: &Env, token: &Address) -> i128 {
+    get_reserve(env, &ReserveKey::ReservedLocks(token.clone()))
+}
+
+pub fn reserve_locks(env: &Env, token: &Address, amount: i128) {
+    adjust_reserve(env, ReserveKey::ReservedLocks(token.clone()), amount);
+}
+
+pub fn release_locks_reserve(env: &Env, token: &Address, amount: i128) {
+    adjust_reserve(env, ReserveKey::ReservedLocks(token.clone()), -amount);
+}
+
 /// Sum of every earmarked balance for `token`: vesting, escrow, stream,
-/// insurance pool, stake pool and collected fees (#1698).
+/// time-weighted locks, insurance pool, stake pool and collected fees (#1698, #1903).
 pub fn get_total_reserved(env: &Env, token: &Address) -> i128 {
     get_reserved_vesting(env, token)
         .saturating_add(get_reserved_escrow(env, token))
         .saturating_add(get_reserved_stream(env, token))
+        .saturating_add(get_reserved_locks(env, token))
         .saturating_add(get_insurance_pool(env, token))
         .saturating_add(get_stake_pool(env, token))
         .saturating_add(get_fees_collected(env, token))

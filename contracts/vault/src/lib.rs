@@ -367,6 +367,8 @@ mod test_disputes;
 #[cfg(test)]
 mod test_earmarked_balances;
 #[cfg(test)]
+mod test_locked_token_reserve;
+#[cfg(test)]
 mod test_execution_recipient_recheck;
 #[cfg(test)]
 mod test_fees;
@@ -14317,6 +14319,8 @@ impl VaultDAO {
 
         // Transfer tokens to vault
         token::transfer_to_vault(&env, &token, &owner, amount);
+        // Locked tokens belong to the locker until unlock, so spending must not touch them (#1903)
+        storage::reserve_locks(&env, &token, amount);
 
         let current_ledger = env.ledger().sequence() as u64;
         let unlock_at = current_ledger + duration;
@@ -14636,6 +14640,9 @@ impl VaultDAO {
         let penalty_amount = (lock.amount * config.early_unlock_penalty_bps as i128) / 10_000;
         let return_amount = lock.amount - penalty_amount;
 
+        // The whole lock leaves the locked reserve; the penalty re-enters as insurance (#1903)
+        storage::release_locks_reserve(&env, &lock.token, lock.amount);
+
         // Transfer tokens back to owner (minus penalty)
         token::transfer(&env, &lock.token, &owner, return_amount);
 
@@ -14686,6 +14693,8 @@ impl VaultDAO {
         }
 
         let amount = lock.amount;
+
+        storage::release_locks_reserve(&env, &lock.token, amount);
 
         // Transfer tokens back to owner
         token::transfer(&env, &lock.token, &owner, amount);
