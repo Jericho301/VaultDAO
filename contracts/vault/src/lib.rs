@@ -369,6 +369,8 @@ mod test_earmarked_balances;
 #[cfg(test)]
 mod test_locked_token_reserve;
 #[cfg(test)]
+mod test_time_weighted_config_validation;
+#[cfg(test)]
 mod test_execution_recipient_recheck;
 #[cfg(test)]
 mod test_fees;
@@ -14740,10 +14742,50 @@ impl VaultDAO {
             return Err(VaultError::InsufficientRole);
         }
 
+        Self::validate_time_weighted_config(&env, &config)?;
+
+        // Disabling blocks unlock_tokens/unlock_early, so existing locks would be stranded (#1904)
+        let current = storage::get_time_weighted_config(&env);
+        if current.enabled && !config.enabled {
+            if let Some(gov_token) = current.governance_token.as_ref() {
+                if storage::get_reserved_locks(&env, gov_token) > 0 {
+                    return Err(VaultError::LockAlreadyActive);
+                }
+            }
+        }
+
         storage::set_time_weighted_config(&env, &config);
         storage::extend_instance_ttl(&env);
         events::emit_config_param_changed(&env, Symbol::new(&env, "time_weighted"), &admin);
 
+        Ok(())
+    }
+
+    /// Reject time-weighted configurations that would make locks or unlocks fail or
+    /// pay out a negative amount (#1904).
+    fn validate_time_weighted_config(
+        env: &Env,
+        config: &types::TimeWeightedConfig,
+    ) -> Result<(), VaultError> {
+        // A penalty above 100% would make `return_amount` negative on early unlock
+        if config.early_unlock_penalty_bps > 10_000 {
+            return Err(VaultError::InvalidAmount);
+        }
+        if config.min_lock_duration == 0
+            || config.max_lock_duration == 0
+            || config.min_lock_duration > config.max_lock_duration
+        {
+            return Err(VaultError::InvalidAmount);
+        }
+        if config.enabled {
+            let gov_token = config
+                .governance_token
+                .as_ref()
+                .ok_or(VaultError::TokenNotSupported)?;
+            if !storage::get_config(env)?.supported_tokens.contains(gov_token) {
+                return Err(VaultError::TokenNotSupported);
+            }
+        }
         Ok(())
     }
 
