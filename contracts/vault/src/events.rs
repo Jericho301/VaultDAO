@@ -713,6 +713,17 @@ pub fn emit_hook_executed(
     );
 }
 
+/// Emit when a hook call fails during proposal execution (#1892)
+///
+/// Topics: `("hook_failed", proposal_id)`
+/// Data:   `(hook, is_pre)`
+pub fn emit_hook_failed(env: &Env, proposal_id: u64, hook: &Address, is_pre: bool) {
+    env.events().publish(
+        (Symbol::new(env, "hook_failed"), proposal_id),
+        (hook.clone(), is_pre),
+    );
+}
+
 /// Emit when liquidity is removed
 #[allow(dead_code)]
 pub fn emit_liquidity_removed(env: &Env, proposal_id: u64, dex: &Address, lp_tokens: i128) {

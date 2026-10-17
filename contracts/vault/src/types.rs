@@ -3193,6 +3193,18 @@ pub struct PendingReserved {
     pub per_proposer: Map<Address, i128>,
 }
 
+/// A post- or pre-execution hook call that failed for a proposal (#1892).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HookFailure {
+    /// Proposal whose execution invoked the hook
+    pub proposal_id: u64,
+    /// Hook contract that failed
+    pub hook: Address,
+    /// True for a pre-execution hook, false for a post-execution hook
+    pub is_pre: bool,
+}
+
 // ============================================================================
 // Issue #1724: Stream Clawback
 // ============================================================================

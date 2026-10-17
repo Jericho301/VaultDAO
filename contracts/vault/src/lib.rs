@@ -39,7 +39,7 @@ use types::{
     DexConfig, Dispute, DisputeResolution, DisputeStatus, Escrow, EscrowStatus,
     ExecutionFeeEstimate, ForceRotationRequest, FundingMilestone, FundingMilestoneStatus,
     FundingRound, FundingRoundConfig, FundingRoundStatus, GasConfig, GasPriceOracleConfig,
-    GasPriceSource, GovernanceProposal, HolidayBehavior, HolidayCalendar, HookEventType,
+    GasPriceSource, GovernanceProposal, HolidayBehavior, HolidayCalendar, HookEventType, HookFailure,
     HookRegistration, ImpactScore, InitConfig, InsuranceClaim, InsuranceClaimStatus,
     InsuranceConfig, ListMode, Milestone, MultiPhaseProposal, NotificationPreferences,
     NotificationPreferencesV2, NotificationPrefs, OptionalProposalOperation,
@@ -446,6 +446,7 @@ mod test_escrow_milestone_partial_release;
 #[cfg(test)]
 mod test_escrow_dispute_timeout;
 mod test_escrow_expiry_precedence;
+mod test_hook_failures;
 mod test_escrow_milestone_auth;
 mod test_escrow_multisig_arbitration;
 #[cfg(test)]
@@ -12888,10 +12889,14 @@ impl VaultDAO {
         Ok(storage::get_config(&env)?.post_execution_hooks)
     }
 
-    /// Get hook failure log for a proposal (simplified - returns bool for now)
-    pub fn has_hook_failure(_env: Env, _proposal_id: u64) -> bool {
-        // Simplified implementation - just return false for now
-        false
+    /// Whether any pre- or post-execution hook failed while executing a proposal (#1892).
+    pub fn has_hook_failure(env: Env, proposal_id: u64) -> bool {
+        !storage::get_hook_failures(&env, proposal_id).is_empty()
+    }
+
+    /// Failed hook calls recorded for a proposal, in the order they occurred (#1892).
+    pub fn get_hook_failures(env: Env, proposal_id: u64) -> Vec<HookFailure> {
+        storage::get_hook_failures(&env, proposal_id)
     }
 
     // ========================================================================
@@ -13083,10 +13088,22 @@ impl VaultDAO {
             Err(_) => {
                 events::emit_hook_executed(env, hook, proposal_id, is_pre, false);
 
+                // Record the failure before deciding whether execution continues. A failed
+                // pre-hook panics below, which reverts this record along with the transaction.
+                storage::add_hook_failure(
+                    env,
+                    &HookFailure {
+                        proposal_id,
+                        hook: hook.clone(),
+                        is_pre,
+                    },
+                );
+                events::emit_hook_failed(env, proposal_id, hook, is_pre);
+
                 if is_pre {
                     panic!("Pre-hook failed");
                 }
-                // Post-hook failures are logged but don't abort execution
+                // Post-hook failures are recorded but don't abort execution
             }
         }
     }
