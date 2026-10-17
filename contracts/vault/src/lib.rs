@@ -7387,6 +7387,7 @@ impl VaultDAO {
         payment_id: u64,
     ) -> Result<(), VaultError> {
         caller.require_auth();
+        require_not_paused(&env)?;
 
         let mut payment = storage::get_recurring_payment(&env, payment_id)?;
 
@@ -7422,13 +7423,14 @@ impl VaultDAO {
     /// # Errors
     /// - [`VaultError::ProposalNotFound`] if the payment does not exist.
     /// - [`VaultError::Unauthorized`] if caller is neither proposer nor Admin.
-    /// - [`VaultError::RecurringPaymentStopped`] if the payment is already stopped.
+    /// - [`VaultError::RecurringPaymentStopped`] if the payment is stopping or stopped.
     pub fn pause_recurring_payment(
         env: Env,
         caller: Address,
         payment_id: u64,
     ) -> Result<(), VaultError> {
         caller.require_auth();
+        require_not_paused(&env)?;
 
         let mut payment = storage::get_recurring_payment(&env, payment_id)?;
 
@@ -7437,7 +7439,11 @@ impl VaultDAO {
             return Err(VaultError::Unauthorized);
         }
 
-        if payment.status == crate::types::RecurringStatus::Stopped {
+        // Pausing a stopping payment would let a later resume cancel the stop.
+        if matches!(
+            payment.status,
+            crate::types::RecurringStatus::Stopped | crate::types::RecurringStatus::Stopping
+        ) {
             return Err(VaultError::RecurringPaymentStopped);
         }
 
@@ -7458,13 +7464,15 @@ impl VaultDAO {
     /// # Errors
     /// - [`VaultError::ProposalNotFound`] if the payment does not exist.
     /// - [`VaultError::Unauthorized`] if caller is neither proposer nor Admin.
-    /// - [`VaultError::RecurringPaymentStopped`] if the payment is stopped.
+    /// - [`VaultError::RecurringPaymentStopped`] if the payment is stopping or stopped.
+    /// - [`VaultError::InvalidStatusTransition`] if the payment is not paused.
     pub fn resume_recurring_payment(
         env: Env,
         caller: Address,
         payment_id: u64,
     ) -> Result<(), VaultError> {
         caller.require_auth();
+        require_not_paused(&env)?;
 
         let mut payment = storage::get_recurring_payment(&env, payment_id)?;
 
@@ -7473,13 +7481,15 @@ impl VaultDAO {
             return Err(VaultError::Unauthorized);
         }
 
-        if payment.status == crate::types::RecurringStatus::Stopped {
-            return Err(VaultError::RecurringPaymentStopped);
+        match payment.status {
+            crate::types::RecurringStatus::Paused => {}
+            crate::types::RecurringStatus::Stopped | crate::types::RecurringStatus::Stopping => {
+                return Err(VaultError::RecurringPaymentStopped);
+            }
+            _ => return Err(VaultError::InvalidStatusTransition),
         }
-
-        if payment.status == crate::types::RecurringStatus::Active {
-            // Already active ? nothing to do
-            return Ok(());
+        if payment.paused_at_ledger == 0 {
+            return Err(VaultError::InvalidStatusTransition);
         }
 
         // Advance next_payment_ledger by the paused duration
