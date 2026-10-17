@@ -910,3 +910,88 @@ fn test_renew_after_grace_period_persists_expiry() {
     assert!(!client.get_subscription(&id).auto_renew);
     assert_eq!(expired.total_payments, 1);
 }
+
+// ============================================================================
+// upgrade_subscription proration
+// ============================================================================
+
+/// Creates a Basic subscription (100 per 1000 ledgers), advances `elapsed`
+/// ledgers, upgrades to Premium (300), and returns the amount the provider
+/// received from the upgrade (on top of the initial 100 payment).
+fn upgrade_charge_after(elapsed: u32) -> i128 {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, _token_admin, token) = setup(&env);
+    let subscriber = Address::generate(&env);
+    let provider = Address::generate(&env);
+
+    fund_subscriber(&env, &token, &subscriber, 10_000);
+
+    let id = client.create_subscription(
+        &subscriber,
+        &provider,
+        &SubscriptionTier::Basic,
+        &token,
+        &100i128,
+        &1000u64,
+        &false,
+        &0u64,
+    );
+
+    let token_client = soroban_sdk::token::Client::new(&env, &token);
+    let before = token_client.balance(&provider);
+
+    env.ledger()
+        .with_mut(|l| l.sequence_number += elapsed);
+    client.upgrade_subscription(&subscriber, &id, &SubscriptionTier::Premium, &300i128);
+
+    token_client.balance(&provider) - before
+}
+
+#[test]
+fn test_upgrade_prorates_charge_at_start_of_period() {
+    // 200 difference for the full 1000-ledger period.
+    assert_eq!(upgrade_charge_after(0), 200);
+}
+
+#[test]
+fn test_upgrade_prorates_charge_in_middle_of_period() {
+    // 200 difference, half the period remaining.
+    assert_eq!(upgrade_charge_after(500), 100);
+}
+
+#[test]
+fn test_upgrade_prorates_charge_near_end_of_period() {
+    // 200 difference, 100 of 1000 ledgers remaining.
+    assert_eq!(upgrade_charge_after(900), 20);
+}
+
+#[test]
+fn test_downgrade_via_upgrade_is_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, _token_admin, token) = setup(&env);
+    let subscriber = Address::generate(&env);
+    let provider = Address::generate(&env);
+
+    fund_subscriber(&env, &token, &subscriber, 10_000);
+
+    let id = client.create_subscription(
+        &subscriber,
+        &provider,
+        &SubscriptionTier::Premium,
+        &token,
+        &300i128,
+        &1000u64,
+        &false,
+        &0u64,
+    );
+
+    let res = client.try_upgrade_subscription(&subscriber, &id, &SubscriptionTier::Basic, &100i128);
+    assert_eq!(res, Err(Ok(VaultError::InvalidSubscriptionChange)));
+
+    let same = client.try_upgrade_subscription(&subscriber, &id, &SubscriptionTier::Premium, &300i128);
+    assert_eq!(same, Err(Ok(VaultError::InvalidSubscriptionChange)));
+}

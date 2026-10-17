@@ -16950,10 +16950,11 @@ impl VaultDAO {
         Ok(())
     }
 
-    /// Upgrade (or downgrade) a subscription tier and amount.
+    /// Upgrade a subscription tier and amount.
     ///
-    /// Only the subscriber may call this. The new amount takes effect on the
-    /// next renewal; no immediate payment is made.
+    /// Only the subscriber may call this. The price difference for the rest of
+    /// the current period is charged immediately and paid to the provider.
+    /// Downgrades and no-op changes are rejected with `InvalidSubscriptionChange`.
     pub fn upgrade_subscription(
         env: Env,
         subscriber: Address,
@@ -16976,6 +16977,35 @@ impl VaultDAO {
         }
 
         let old_tier = sub.tier.clone();
+        let old_amount = sub.amount_per_period;
+
+        // Upgrades only: downgrades must go through the grace-period flow.
+        let tier_lowered = (new_tier.clone() as u32) < (old_tier.clone() as u32);
+        if tier_lowered || new_amount_per_period < old_amount {
+            return Err(VaultError::InvalidSubscriptionChange);
+        }
+        if new_tier == old_tier && new_amount_per_period == old_amount {
+            return Err(VaultError::InvalidSubscriptionChange);
+        }
+
+        // Prorate the price difference over the remaining part of the period.
+        let diff = new_amount_per_period - old_amount;
+        if diff > 0 {
+            let current_ledger = env.ledger().sequence() as u64;
+            let remaining = sub
+                .next_renewal_ledger
+                .saturating_sub(current_ledger)
+                .min(sub.interval_ledgers);
+            let charge = diff
+                .checked_mul(remaining as i128)
+                .ok_or(VaultError::InvalidAmount)?
+                / sub.interval_ledgers as i128;
+            if charge > 0 {
+                token::transfer_to_vault(&env, &sub.token, &subscriber, charge);
+                token::transfer(&env, &sub.token, &sub.service_provider, charge);
+            }
+        }
+
         sub.tier = new_tier.clone();
         sub.amount_per_period = new_amount_per_period;
 
