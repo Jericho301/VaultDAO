@@ -16915,8 +16915,22 @@ impl VaultDAO {
             return Err(VaultError::NotSubscriberOrAdmin);
         }
 
-        // Pull renewal payment from subscriber into vault, then forward to provider.
-        token::transfer_to_vault(&env, &sub.token, &sub.subscriber, sub.amount_per_period);
+        // Draw the renewal from the prepaid balance so a keeper can renew without the
+        // subscriber's signature. Only a subscriber-initiated renewal may fall back to
+        // pulling directly from the subscriber, since a keeper cannot authorize that.
+        let prepaid = storage::get_subscription_balance(&env, subscription_id);
+        if prepaid >= sub.amount_per_period {
+            storage::set_subscription_balance(
+                &env,
+                subscription_id,
+                prepaid - sub.amount_per_period,
+            );
+            storage::release_subscription_reserve(&env, &sub.token, sub.amount_per_period);
+        } else if caller == sub.subscriber {
+            token::transfer_to_vault(&env, &sub.token, &sub.subscriber, sub.amount_per_period);
+        } else {
+            return Err(VaultError::InsufficientBalance);
+        }
         token::transfer(
             &env,
             &sub.token,
@@ -16937,6 +16951,96 @@ impl VaultDAO {
         events::emit_subscription_renewed(&env, subscription_id, payment_number, amount);
 
         Ok(())
+    }
+
+    /// Add funds to a subscription's prepaid balance.
+    ///
+    /// The subscriber transfers `amount` into the vault. Renewals draw from this
+    /// balance first, which lets a keeper renew without the subscriber signing.
+    ///
+    /// # Errors
+    /// - [`VaultError::InvalidAmount`] if `amount` is not positive.
+    /// - [`VaultError::NotSubscriberOrAdmin`] if `subscriber` does not own the subscription.
+    /// - [`VaultError::SubscriptionAlreadyCancelled`] if the subscription is cancelled.
+    /// - [`VaultError::SubscriptionAlreadyExpired`] if the subscription is expired.
+    pub fn top_up_subscription(
+        env: Env,
+        subscriber: Address,
+        subscription_id: u64,
+        amount: i128,
+    ) -> Result<(), VaultError> {
+        subscriber.require_auth();
+        require_not_paused(&env)?;
+
+        if amount <= 0 {
+            return Err(VaultError::InvalidAmount);
+        }
+
+        let sub = storage::get_subscription(&env, subscription_id)?;
+        if sub.subscriber != subscriber {
+            return Err(VaultError::NotSubscriberOrAdmin);
+        }
+        match sub.status {
+            SubscriptionStatus::Cancelled => return Err(VaultError::SubscriptionAlreadyCancelled),
+            SubscriptionStatus::Expired => return Err(VaultError::SubscriptionAlreadyExpired),
+            _ => {}
+        }
+
+        token::transfer_to_vault(&env, &sub.token, &subscriber, amount);
+        let balance = storage::get_subscription_balance(&env, subscription_id);
+        storage::set_subscription_balance(&env, subscription_id, balance + amount);
+        storage::reserve_subscription(&env, &sub.token, amount);
+        storage::extend_instance_ttl(&env);
+
+        Ok(())
+    }
+
+    /// Withdraw unspent prepaid funds from a subscription back to the subscriber.
+    ///
+    /// Not pause-gated, so subscribers can always reclaim their own funds. Works
+    /// on cancelled and expired subscriptions too.
+    ///
+    /// # Errors
+    /// - [`VaultError::InvalidAmount`] if `amount` is not positive.
+    /// - [`VaultError::NotSubscriberOrAdmin`] if `subscriber` does not own the subscription.
+    /// - [`VaultError::InsufficientBalance`] if `amount` exceeds the prepaid balance.
+    pub fn withdraw_subscription_balance(
+        env: Env,
+        subscriber: Address,
+        subscription_id: u64,
+        amount: i128,
+    ) -> Result<(), VaultError> {
+        subscriber.require_auth();
+
+        if amount <= 0 {
+            return Err(VaultError::InvalidAmount);
+        }
+
+        let sub = storage::get_subscription(&env, subscription_id)?;
+        if sub.subscriber != subscriber {
+            return Err(VaultError::NotSubscriberOrAdmin);
+        }
+
+        let balance = storage::get_subscription_balance(&env, subscription_id);
+        if amount > balance {
+            return Err(VaultError::InsufficientBalance);
+        }
+
+        storage::set_subscription_balance(&env, subscription_id, balance - amount);
+        storage::release_subscription_reserve(&env, &sub.token, amount);
+        token::transfer(&env, &sub.token, &subscriber, amount);
+        storage::extend_instance_ttl(&env);
+
+        Ok(())
+    }
+
+    /// Prepaid balance held by the vault for a subscription.
+    ///
+    /// # Errors
+    /// - [`VaultError::SubscriptionNotFound`] if the subscription does not exist.
+    pub fn get_subscription_balance(env: Env, subscription_id: u64) -> Result<i128, VaultError> {
+        storage::get_subscription(&env, subscription_id)?;
+        Ok(storage::get_subscription_balance(&env, subscription_id))
     }
 
     /// Cancel a subscription.
