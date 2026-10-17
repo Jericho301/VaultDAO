@@ -373,6 +373,8 @@ mod test_time_weighted_config_validation;
 #[cfg(test)]
 mod test_funding_round_proposal_link;
 #[cfg(test)]
+mod test_funding_round_reserve;
+#[cfg(test)]
 mod test_execution_recipient_recheck;
 #[cfg(test)]
 mod test_fees;
@@ -15836,9 +15838,12 @@ impl VaultDAO {
         Ok(round_id)
     }
 
-    /// Approve a funding round, transitioning it from Pending ? Approved ? Active.
+    /// Approve a funding round, transitioning it from Pending to Active.
     ///
-    /// Access: Admin role required.
+    /// Access: Admin role required, and the approver must be a vault signer.
+    ///
+    /// Activation needs `threshold` distinct Admin approvals (#1901). Once reached,
+    /// the round total is reserved so that no other spend can take it.
     pub fn approve_funding_round(
         env: Env,
         approver: Address,
@@ -15851,13 +15856,35 @@ impl VaultDAO {
             return Err(VaultError::InsufficientRole);
         }
 
+        let vault_config = storage::get_config(&env)?;
+        if !vault_config.signers.contains(&approver) {
+            return Err(VaultError::NotASigner);
+        }
+
         let mut round = storage::get_funding_round(&env, round_id)?;
 
         if round.status != FundingRoundStatus::Pending {
             return Err(VaultError::InvalidAmount);
         }
 
-        // Transition: Pending ? Approved ? Active (combined for simplicity)
+        let mut approvals = storage::get_funding_round_approvals(&env, round_id);
+        if approvals.contains(&approver) {
+            return Err(VaultError::AlreadyApproved);
+        }
+        approvals.push_back(approver.clone());
+        storage::set_funding_round_approvals(&env, round_id, &approvals);
+
+        if approvals.len() < vault_config.threshold {
+            storage::extend_instance_ttl(&env);
+            return Ok(());
+        }
+
+        // Quorum reached: the round total must be spendable and is then earmarked (#1901)
+        if Self::available_balance(&env, &round.token) < round.total_amount {
+            return Err(VaultError::InsufficientBalance);
+        }
+        storage::reserve_funding(&env, &round.token, round.total_amount);
+
         round.status = FundingRoundStatus::Active;
         round.approved_at = env.ledger().timestamp();
 
@@ -15978,6 +16005,57 @@ impl VaultDAO {
         Ok(amount)
     }
 
+    /// Apply the same spending controls as proposal execution to a funding payout (#1901):
+    /// per-proposal, daily, weekly and per-token limits plus the hourly circuit breaker.
+    /// On success the payout is recorded against every bucket it counts toward.
+    fn enforce_funding_release_limits(
+        env: &Env,
+        token: &Address,
+        amount: i128,
+        spending_limit: i128,
+        daily_limit: i128,
+        weekly_limit: i128,
+    ) -> Result<(), VaultError> {
+        if amount > spending_limit {
+            return Err(VaultError::ExceedsProposalLimit);
+        }
+
+        let today = storage::get_day_number(env);
+        if storage::get_daily_spent(env, today) + amount > daily_limit {
+            return Err(VaultError::ExceedsDailyLimit);
+        }
+        let week = storage::get_week_number(env);
+        if storage::get_weekly_spent(env, week) + amount > weekly_limit {
+            return Err(VaultError::ExceedsWeeklyLimit);
+        }
+
+        if let Some(token_cfg) = storage::get_token_spending_config(env, token) {
+            if storage::get_token_daily_spent(env, token, today) + amount > token_cfg.daily_limit {
+                return Err(VaultError::ExceedsTokenDailyLimit);
+            }
+            if storage::get_token_weekly_spent(env, token, week) + amount > token_cfg.weekly_limit
+            {
+                return Err(VaultError::ExceedsTokenWeeklyLimit);
+            }
+        }
+
+        let cb_threshold = storage::get_circuit_breaker_threshold(env);
+        if cb_threshold > 0 {
+            let window = storage::get_hour_window(env);
+            let outflow = storage::get_circuit_breaker_outflow(env, window);
+            if outflow + amount > cb_threshold {
+                return Err(VaultError::VaultPaused);
+            }
+            storage::add_circuit_breaker_outflow(env, window, amount);
+        }
+
+        storage::add_daily_spent(env, today, amount);
+        storage::add_weekly_spent(env, week, amount);
+        storage::add_token_daily_spent(env, token, today, amount);
+        storage::add_token_weekly_spent(env, token, week, amount);
+        Ok(())
+    }
+
     /// Release funds for verified milestones
     pub fn release_round_funds(
         env: Env,
@@ -16032,10 +16110,20 @@ impl VaultDAO {
             }
         }
 
-        // Release proportional tranche to recipient
-        token::transfer(&env, &round.token, &round.recipient, amount);
-        round.released_amount = round.released_amount.saturating_add(amount);
+        // Every payout is subject to the recipient list, spending limits and circuit breaker (#1901)
+        Self::validate_recipient(&env, &round.recipient)?;
+        Self::enforce_funding_release_limits(
+            &env,
+            &round.token,
+            amount,
+            vault_config.spending_limit,
+            vault_config.daily_limit,
+            vault_config.weekly_limit,
+        )?;
 
+        // Release the tranche from the round's earmarked reserve, then pay the recipient
+        storage::release_funding_reserve(&env, &round.token, amount);
+        token::transfer(&env, &round.token, &round.recipient, amount);
         round.released_amount = round.released_amount.saturating_add(amount);
 
         // Auto-complete if all milestones are now verified
@@ -16086,6 +16174,12 @@ impl VaultDAO {
             || round.status == FundingRoundStatus::Cancelled
         {
             return Err(VaultError::InvalidAmount);
+        }
+
+        // Only an Active round holds a reservation; return the unreleased part (#1901)
+        if round.status == FundingRoundStatus::Active {
+            let unreleased = round.total_amount.saturating_sub(round.released_amount);
+            storage::release_funding_reserve(&env, &round.token, unreleased);
         }
 
         round.status = FundingRoundStatus::Cancelled;
