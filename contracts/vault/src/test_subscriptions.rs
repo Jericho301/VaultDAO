@@ -995,3 +995,42 @@ fn test_downgrade_via_upgrade_is_rejected() {
     let same = client.try_upgrade_subscription(&subscriber, &id, &SubscriptionTier::Premium, &300i128);
     assert_eq!(same, Err(Ok(VaultError::InvalidSubscriptionChange)));
 }
+
+#[test]
+fn test_reactivate_preserves_manual_renew_setting() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, _token_admin, token) = setup(&env);
+    let subscriber = Address::generate(&env);
+    let provider = Address::generate(&env);
+    let other = Address::generate(&env);
+
+    fund_subscriber(&env, &token, &subscriber, 100_000);
+
+    let id = client.create_subscription(
+        &subscriber,
+        &provider,
+        &SubscriptionTier::Basic,
+        &token,
+        &100i128,
+        &500u64,
+        &false,
+        &50u64,
+    );
+
+    let sub = client.get_subscription(&id);
+    let advance = sub.next_renewal_ledger + 51 - env.ledger().sequence() as u64;
+    env.ledger()
+        .with_mut(|l| l.sequence_number += advance as u32);
+    client.expire_overdue_subscriptions(&subscriber);
+
+    client.reactivate_subscription(&subscriber, &id);
+    let reactivated = client.get_subscription(&id);
+    assert_eq!(reactivated.status, SubscriptionStatus::Active);
+    assert!(!reactivated.auto_renew);
+
+    // A third party must still not be able to trigger a charge.
+    let res = client.try_renew_subscription(&other, &id);
+    assert_eq!(res, Err(Ok(VaultError::NotSubscriberOrAdmin)));
+}

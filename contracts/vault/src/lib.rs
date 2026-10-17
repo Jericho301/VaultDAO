@@ -16876,8 +16876,8 @@ impl VaultDAO {
         if current_ledger > grace_deadline {
             // Persist the expiry and return Ok: an Err would roll the write back.
             // No payment is taken; callers must check the status to see the result.
+            // auto_renew is kept so reactivation restores the subscriber's choice.
             sub.status = SubscriptionStatus::Expired;
-            sub.auto_renew = false;
             storage::set_subscription(&env, &sub);
             storage::extend_instance_ttl(&env);
             events::emit_subscription_expired(&env, subscription_id);
@@ -17057,7 +17057,6 @@ impl VaultDAO {
             if current_ledger > grace_deadline {
                 let mut expired_sub = sub;
                 expired_sub.status = SubscriptionStatus::Expired;
-                expired_sub.auto_renew = false;
                 storage::set_subscription(&env, &expired_sub);
                 events::emit_subscription_expired(&env, id);
                 expired_count += 1;
@@ -17101,7 +17100,6 @@ impl VaultDAO {
         );
 
         sub.status = SubscriptionStatus::Active;
-        sub.auto_renew = true;
         sub.total_payments += 1;
         sub.last_payment_ledger = current_ledger;
         sub.next_renewal_ledger = current_ledger + sub.interval_ledgers;
