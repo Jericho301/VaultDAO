@@ -58,6 +58,11 @@ import {
   getRole,
   getTodaySpent,
   isSigner,
+  pauseVault,
+  unpauseVault,
+  configureEmergency,
+  getPauseState,
+  getPauseCooldownRemaining,
 } from "./contract";
 import {
   getContract,
@@ -808,6 +813,91 @@ describe("contract.ts bindings", () => {
       await isSigner("GALICE", "GCALLER", { ...opts, logger });
 
       expect(logger.debug).toHaveBeenCalled();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Emergency pause
+  // -------------------------------------------------------------------------
+
+  describe("Emergency pause", () => {
+    beforeEach(() => {
+      serverMock.getAccount.mockResolvedValue({ accountId: () => "GCALLER" });
+    });
+
+    it("pauseVault encodes the signer and the cause as a symbol", async () => {
+      await pauseVault("GSIGNER", "incident_42", opts);
+      expect(contractCallSpy).toHaveBeenCalledWith("pause_vault", "addr:GSIGNER", "sym:incident_42");
+      expect(buildTransaction).toHaveBeenCalledWith("GSIGNER", expect.anything(), opts);
+    });
+
+    it("pauseVault accepts a 32-character cause and rejects anything longer or malformed", async () => {
+      await expect(pauseVault("GSIGNER", "a".repeat(32), opts)).resolves.toBeDefined();
+      await expect(pauseVault("GSIGNER", "a".repeat(33), opts)).rejects.toThrow(/cause/);
+      await expect(pauseVault("GSIGNER", "has space", opts)).rejects.toThrow(/cause/);
+      await expect(pauseVault("GSIGNER", "", opts)).rejects.toThrow(/cause/);
+    });
+
+    it("unpauseVault encodes only the signer", async () => {
+      await unpauseVault("GSIGNER", opts);
+      expect(contractCallSpy).toHaveBeenCalledWith("unpause_vault", "addr:GSIGNER");
+      expect(buildTransaction).toHaveBeenCalledWith("GSIGNER", expect.anything(), opts);
+    });
+
+    it("configureEmergency encodes admin, the signer vector, and the threshold", async () => {
+      await configureEmergency("GADMIN", ["GS1", "GS2"], 3n, opts);
+      const call = contractCallSpy.mock.calls.at(-1)!;
+      expect(call[0]).toBe("configure_emergency");
+      expect(call[1]).toBe("addr:GADMIN");
+      expect(call[2].switch().name).toBe("scvVec");
+      expect(call[3]).toBe("i128:3");
+    });
+
+    it("configureEmergency rejects an empty signer list, a blank signer, or a negative threshold", async () => {
+      await expect(configureEmergency("GADMIN", [], 3n, opts)).rejects.toThrow(/signers/);
+      await expect(configureEmergency("GADMIN", ["GS1", ""], 3n, opts)).rejects.toThrow(/signers\[1\]/);
+      await expect(configureEmergency("GADMIN", ["GS1"], -1n, opts)).rejects.toThrow(/circuitBreakerThreshold/);
+    });
+
+    it("getPauseState decodes the pause fields into PauseState", async () => {
+      serverMock.simulateTransaction.mockResolvedValue({ transactionData: {}, result: { retval: {} } });
+      (decodeScVal as Mock).mockReturnValue({
+        is_paused: true,
+        paused_by: "GSIGNER",
+        paused_at_ledger: 120,
+        cause: "incident_42",
+      });
+
+      const state = await getPauseState("GCALLER", opts);
+
+      expect(state).toEqual({
+        isPaused: true,
+        pausedBy: "GSIGNER",
+        pausedAtLedger: 120,
+        cause: "incident_42",
+      });
+    });
+
+    it("getPauseState reports an unpaused vault with a null signer", async () => {
+      serverMock.simulateTransaction.mockResolvedValue({ transactionData: {}, result: { retval: {} } });
+      (decodeScVal as Mock).mockReturnValue({
+        is_paused: false,
+        paused_by: null,
+        paused_at_ledger: 0,
+        cause: "none",
+      });
+
+      const state = await getPauseState("GCALLER", opts);
+
+      expect(state.isPaused).toBe(false);
+      expect(state.pausedBy).toBeNull();
+    });
+
+    it("getPauseCooldownRemaining returns the remaining ledgers as a bigint", async () => {
+      serverMock.simulateTransaction.mockResolvedValue({ transactionData: {}, result: { retval: {} } });
+      (decodeScVal as Mock).mockReturnValue(7);
+
+      await expect(getPauseCooldownRemaining("GCALLER", opts)).resolves.toBe(7n);
     });
   });
 });
