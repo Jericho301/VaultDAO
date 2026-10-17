@@ -444,6 +444,7 @@ mod test_escrow_expiration;
 #[cfg(test)]
 mod test_escrow_milestone_partial_release;
 #[cfg(test)]
+mod test_escrow_milestone_auth;
 mod test_escrow_multisig_arbitration;
 #[cfg(test)]
 mod test_escrow_timeout;
@@ -13975,6 +13976,11 @@ impl VaultDAO {
         let mut escrow = storage::get_escrow(&env, escrow_id)?;
         let current_ledger = env.ledger().sequence() as u64;
 
+        // Only the funder or the escrow's arbitrator may certify milestone completion
+        if completer != escrow.funder && completer != escrow.arbitrator {
+            return Err(VaultError::Unauthorized);
+        }
+
         // Validate escrow is active (not disputed, released, or refunded)
         if escrow.status != EscrowStatus::Active {
             return Err(VaultError::ProposalNotPending);
@@ -14036,6 +14042,7 @@ impl VaultDAO {
         storage::set_escrow(&env, &escrow);
 
         events::emit_milestone_completed(&env, escrow_id, milestone_id, &completer);
+        storage::create_audit_entry(&env, AuditAction::MilestoneCompleted, &completer, escrow_id);
 
         Ok(())
     }

@@ -1410,6 +1410,8 @@ pub enum AuditAction {
     PhaseExecuted = 29,
     /// A single phase of a multi-phase proposal failed to execute.
     PhaseFailed = 30,
+    /// A milestone of an escrow was marked complete by the funder or arbitrator.
+    MilestoneCompleted = 31,
 }
 
 /// Audit trail entry with cryptographic verification
