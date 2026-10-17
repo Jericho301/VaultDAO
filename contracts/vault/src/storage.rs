@@ -25,7 +25,7 @@ use crate::errors::VaultError;
 use crate::types::{
     AuditCheckpoint, AuditEntry, BridgeConfig, CapabilityToken, ClawbackRequest, ClawbackStatus, ColdSignatureRecord,
     ColdSignerConfig, Comment, Config, CostModel, CrossChainProposal, DeadLetterRecord,
-    DelegatedPermission, Delegation, DelegationHistory, DexConfig, Escrow, ExecutionFeeEstimate,
+    DelegatedPermission, Delegation, DelegationHistory, DexConfig, Escrow, EscrowStatus, ExecutionFeeEstimate,
     ExecutionSnapshot, FeeStructure, ForceRotationRequest, FundingRound, FundingRoundConfig,
     GasConfig, GasPriceOracleConfig, GovernanceProposal, HolidayCalendar, HookEventType,
     HookRegistration, InsuranceClaim, InsuranceConfig, InsuranceVotingConfig, ListMode,
@@ -3412,10 +3412,18 @@ pub fn set_escrow(env: &Env, escrow: &Escrow) {
 }
 
 pub fn get_escrow(env: &Env, id: u64) -> Result<Escrow, VaultError> {
-    env.storage()
+    let mut escrow: Escrow = env
+        .storage()
         .persistent()
         .get(&FeatureKey::Escrow(id))
-        .ok_or(VaultError::ProposalNotFound)
+        .ok_or(VaultError::ProposalNotFound)?;
+    // Escrows disputed before `disputed_at` existed have no recorded dispute
+    // ledger. Backfill from `created_at` so their timeout keeps its old meaning.
+    if escrow.status == EscrowStatus::Disputed && escrow.disputed_at == 0 {
+        escrow.disputed_at = escrow.created_at;
+        set_escrow(env, &escrow);
+    }
+    Ok(escrow)
 }
 
 pub fn get_funder_escrows(env: &Env, funder: &Address) -> Vec<u64> {

@@ -18,7 +18,7 @@ use crate::types::{
 use crate::{VaultDAO, VaultDAOClient};
 use soroban_sdk::{testutils::Address as _, token::StellarAssetClient, Address, Env, Vec};
 
-fn setup(env: &Env) -> (VaultDAOClient<'_>, Address, Address) {
+pub(crate) fn setup(env: &Env) -> (VaultDAOClient<'_>, Address, Address) {
     let contract_id = env.register(VaultDAO, ());
     let client = VaultDAOClient::new(env, &contract_id);
     let admin = Address::generate(env);

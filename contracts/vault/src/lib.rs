@@ -444,6 +444,7 @@ mod test_escrow_expiration;
 #[cfg(test)]
 mod test_escrow_milestone_partial_release;
 #[cfg(test)]
+mod test_escrow_dispute_timeout;
 mod test_escrow_milestone_auth;
 mod test_escrow_multisig_arbitration;
 #[cfg(test)]
@@ -13940,6 +13941,7 @@ impl VaultDAO {
             created_at: current_ledger,
             expires_at: current_ledger + duration_ledgers,
             finalized_at: 0,
+            disputed_at: 0,
             requires_signer_approval: false,
             approval_votes: 0,
             rejection_votes: 0,
@@ -14152,6 +14154,7 @@ impl VaultDAO {
 
         escrow.status = EscrowStatus::Disputed;
         escrow.dispute_reason = reason.clone();
+        escrow.disputed_at = env.ledger().sequence() as u64;
 
         storage::set_escrow(&env, &escrow);
 
@@ -14229,7 +14232,7 @@ impl VaultDAO {
             return Err(VaultError::ProposalNotPending);
         }
 
-        let dispute_duration = current_ledger.saturating_sub(escrow.created_at);
+        let dispute_duration = current_ledger.saturating_sub(escrow.disputed_at);
         if dispute_duration < config.arbitration_timeout_ledgers {
             return Err(VaultError::TimelockNotExpired);
         }

@@ -1986,6 +1986,9 @@ pub struct Escrow {
     pub expires_at: u64,
     /// Ledger when escrow was released/refunded (0 if still active)
     pub finalized_at: u64,
+    /// Ledger when the escrow was disputed (0 if never disputed).
+    /// Arbitration timeout is measured from this ledger.
+    pub disputed_at: u64,
     /// Whether escrow release requires signer voting approval - Issue #1431
     pub requires_signer_approval: bool,
     /// Count of approval votes received - Issue #1431
