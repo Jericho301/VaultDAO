@@ -66,6 +66,16 @@ import {
   supersedeProposal,
   delegateVotingPower,
   revokeDelegation,
+  submitInsuranceClaim,
+  voteOnInsuranceClaim,
+  closeInsuranceClaimVoting,
+  getInsuranceClaim,
+  enableAutoCompound,
+  compoundStake,
+  updateStakingConfig,
+  proposeStakeWithdrawal,
+  getStakeRecord,
+  getStakingConfig,
 } from "./contract";
 import {
   getContract,
@@ -77,6 +87,9 @@ import {
   symbolToScVal,
   enumToScVal,
   vecToScVal,
+  boolToScVal,
+  bytesN32ToScVal,
+  structToScVal,
   decodeScVal,
   parseError,
 } from "./utils";
@@ -104,6 +117,9 @@ vi.mock("./utils", () => ({
   symbolToScVal: vi.fn((v: unknown) => `sym:${v}`),
   enumToScVal: vi.fn((v: unknown) => `enum:${v}`),
   vecToScVal: vi.fn((v: unknown[]) => `vec:${v.length}`),
+  boolToScVal: vi.fn((v: unknown) => `bool:${v}`),
+  bytesN32ToScVal: vi.fn((v: unknown) => `bytes32:${v}`),
+  structToScVal: vi.fn((v: unknown) => v),
   decodeScVal: vi.fn(),
   parseError: vi.fn((e: unknown) => e),
   retryOnRateLimit: vi.fn(async (fn: () => Promise<unknown>) => fn()),
@@ -411,6 +427,265 @@ describe("contract.ts bindings", () => {
         delegateVotingPower(
           "GDELEG",
           { delegate: "GDEST", expiryLedger: -1n },
+          opts,
+        ),
+      ).rejects.toThrow();
+      expect(buildTransaction).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("Insurance Claims", () => {
+    const evidenceHash = "ab".repeat(32);
+
+    it("submitInsuranceClaim encodes claim fields and calls submit_insurance_claim", async () => {
+      const xdr = await submitInsuranceClaim(
+        "GCLAIM",
+        { token: "CTOKEN", amount: 500n, evidenceHash, voteDeadline: 1000n },
+        opts,
+      );
+      expect(xdr).toBe("FAKE_TX_XDR");
+      expect(contractCallSpy).toHaveBeenCalledWith(
+        "submit_insurance_claim",
+        "addr:GCLAIM",
+        "addr:CTOKEN",
+        "i128:500",
+        `bytes32:${evidenceHash}`,
+        "u64:1000",
+      );
+      expect(buildTransaction).toHaveBeenCalledWith(
+        "GCLAIM",
+        expect.anything(),
+        opts,
+      );
+    });
+
+    it("voteOnInsuranceClaim encodes the approve flag as a bool", async () => {
+      await voteOnInsuranceClaim("GVOTER", 3n, false, opts);
+      expect(contractCallSpy).toHaveBeenCalledWith(
+        "vote_on_insurance_claim",
+        "addr:GVOTER",
+        "u64:3",
+        "bool:false",
+      );
+    });
+
+    it("closeInsuranceClaimVoting encodes closer and claim id", async () => {
+      await closeInsuranceClaimVoting("GCLOSE", 3n, opts);
+      expect(contractCallSpy).toHaveBeenCalledWith(
+        "close_insurance_claim_voting",
+        "addr:GCLOSE",
+        "u64:3",
+      );
+    });
+
+    it("getInsuranceClaim decodes the on-chain claim into camelCase fields", async () => {
+      serverMock.getAccount.mockResolvedValue({ accountId: () => "GCALLER" });
+      serverMock.simulateTransaction.mockResolvedValue({
+        transactionData: {},
+        result: { retval: {} },
+      });
+      (decodeScVal as Mock).mockReturnValue({
+        id: 3n,
+        claimant: "GCLAIM",
+        amount: 500n,
+        evidence_hash: new Uint8Array(32),
+        vote_deadline: 1000n,
+        approve_weight: 2n,
+        reject_weight: 1n,
+        token: "CTOKEN",
+        bond_amount: 25n,
+        bond_settled: false,
+        status: "Pending",
+        created_at: 900n,
+        approval_threshold_bps: 5000,
+        quorum_bps: 2000,
+        voting_window: 100n,
+        eligible_voters: 5,
+        voter_count: 3,
+        voting_closed: false,
+      });
+
+      const claim = await getInsuranceClaim(3n, "GCALLER", opts);
+
+      expect(contractCallSpy).toHaveBeenCalledWith("get_insurance_claim", "u64:3");
+      expect(claim.id).toBe(3n);
+      expect(claim.approveWeight).toBe(2n);
+      expect(claim.bondAmount).toBe(25n);
+      expect(claim.status).toBe("Pending");
+      expect(claim.approvalThresholdBps).toBe(5000);
+      expect(claim.votingClosed).toBe(false);
+    });
+  });
+
+  describe("Staking", () => {
+    it("enableAutoCompound encodes staker and proposal id", async () => {
+      await enableAutoCompound("GSTAKER", 9n, opts);
+      expect(contractCallSpy).toHaveBeenCalledWith(
+        "enable_auto_compound",
+        "addr:GSTAKER",
+        "u64:9",
+      );
+    });
+
+    it("compoundStake encodes keeper and proposal id", async () => {
+      await compoundStake("GKEEPER", 9n, opts);
+      expect(contractCallSpy).toHaveBeenCalledWith(
+        "compound_stake",
+        "addr:GKEEPER",
+        "u64:9",
+      );
+    });
+
+    it("updateStakingConfig encodes every config field as a struct", async () => {
+      await updateStakingConfig(
+        "GADMIN",
+        {
+          enabled: true,
+          minAmount: 100n,
+          baseStakeBps: 250,
+          maxStakeAmount: 10000n,
+          reputationDiscountThreshold: 50,
+          reputationDiscountPercentage: 10,
+          slashPercentage: 10,
+          cancellationSlashPercentage: 20,
+          slashToInsurancePool: true,
+          compoundLockPeriod: 5n,
+          compoundEpoch: 7n,
+          rewardBpsPerExecution: 30,
+        },
+        opts,
+      );
+      expect(contractCallSpy).toHaveBeenCalledWith(
+        "update_staking_config",
+        "addr:GADMIN",
+        expect.objectContaining({
+          enabled: "bool:true",
+          min_amount: "i128:100",
+          base_stake_bps: "u32:250",
+          slash_percentage: "u32:10",
+          slash_to_insurance_pool: "bool:true",
+          compound_lock_period: "u64:5",
+          reward_bps_per_execution: "u32:30",
+        }),
+      );
+    });
+
+    it("proposeStakeWithdrawal encodes token, amount, and recipient", async () => {
+      await proposeStakeWithdrawal(
+        "GPROP",
+        { token: "CTOKEN", amount: 40n, recipient: "GRECIP" },
+        opts,
+      );
+      expect(contractCallSpy).toHaveBeenCalledWith(
+        "propose_stake_withdrawal",
+        "addr:GPROP",
+        "addr:CTOKEN",
+        "i128:40",
+        "addr:GRECIP",
+      );
+    });
+
+    it("getStakeRecord returns null when the contract has no record", async () => {
+      serverMock.getAccount.mockResolvedValue({ accountId: () => "GCALLER" });
+      serverMock.simulateTransaction.mockResolvedValue({
+        transactionData: {},
+        result: { retval: {} },
+      });
+      (decodeScVal as Mock).mockReturnValue(null);
+
+      await expect(getStakeRecord(9n, "GCALLER", opts)).resolves.toBeNull();
+    });
+
+    it("getStakeRecord decodes an existing record into camelCase fields", async () => {
+      serverMock.getAccount.mockResolvedValue({ accountId: () => "GCALLER" });
+      serverMock.simulateTransaction.mockResolvedValue({
+        transactionData: {},
+        result: { retval: {} },
+      });
+      (decodeScVal as Mock).mockReturnValue({
+        proposal_id: 9n,
+        staker: "GSTAKER",
+        token: "CTOKEN",
+        amount: 1000n,
+        locked_at: 800n,
+        refunded: false,
+        slashed: true,
+        slashed_amount: 100n,
+        released_at: 0n,
+        auto_compound: true,
+        reinvestment_lock_until: 850n,
+        last_compounded: 820n,
+        staking_tier: 2,
+        accumulated_rewards: 15n,
+      });
+
+      const record = await getStakeRecord(9n, "GCALLER", opts);
+
+      expect(record).toMatchObject({
+        proposalId: 9n,
+        staker: "GSTAKER",
+        slashedAmount: 100n,
+        autoCompound: true,
+        stakingTier: 2,
+        accumulatedRewards: 15n,
+      });
+    });
+
+    it("getStakingConfig decodes the stored configuration", async () => {
+      serverMock.getAccount.mockResolvedValue({ accountId: () => "GCALLER" });
+      serverMock.simulateTransaction.mockResolvedValue({
+        transactionData: {},
+        result: { retval: {} },
+      });
+      (decodeScVal as Mock).mockReturnValue({
+        enabled: true,
+        min_amount: 100n,
+        base_stake_bps: 250,
+        max_stake_amount: 10000n,
+        reputation_discount_threshold: 50,
+        reputation_discount_percentage: 10,
+        slash_percentage: 10,
+        cancellation_slash_percentage: 20,
+        slash_to_insurance_pool: true,
+        compound_lock_period: 5n,
+        compound_epoch: 7n,
+        reward_bps_per_execution: 30,
+      });
+
+      const config = await getStakingConfig("GCALLER", opts);
+
+      expect(config.minAmount).toBe(100n);
+      expect(config.cancellationSlashPercentage).toBe(20);
+      expect(config.rewardBpsPerExecution).toBe(30);
+    });
+
+    it("rejects invalid inputs before building a transaction", async () => {
+      await expect(
+        submitInsuranceClaim(
+          "GCLAIM",
+          { token: "CTOKEN", amount: 0n, evidenceHash: "ab".repeat(32), voteDeadline: 1000n },
+          opts,
+        ),
+      ).rejects.toThrow();
+      await expect(voteOnInsuranceClaim("GVOTER", 0n, true, opts)).rejects.toThrow();
+      await expect(enableAutoCompound("", 9n, opts)).rejects.toThrow();
+      await expect(
+        updateStakingConfig(
+          "GADMIN",
+          {
+            enabled: true,
+            minAmount: -1n,
+            baseStakeBps: 0,
+            maxStakeAmount: 0n,
+            reputationDiscountThreshold: 0,
+            reputationDiscountPercentage: 0,
+            slashPercentage: 0,
+            cancellationSlashPercentage: 0,
+            slashToInsurancePool: false,
+            compoundLockPeriod: 0n,
+            compoundEpoch: 0n,
+            rewardBpsPerExecution: 0,
+          },
           opts,
         ),
       ).rejects.toThrow();

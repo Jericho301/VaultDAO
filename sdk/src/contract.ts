@@ -25,6 +25,10 @@ import type {
   AuditEntry,
   VoteChoice,
   VotingDelegation,
+  InsuranceClaim,
+  InsuranceClaimStatus,
+  StakeRecord,
+  StakingConfig,
 } from "./types";
 import { Role, ProposalStatus, VaultError, VaultErrorCode, noopLogger } from "./types";
 import type { SdkLogger } from "./types";
@@ -41,6 +45,9 @@ import {
   retryOnRateLimit,
   enumToScVal,
   vecToScVal,
+  boolToScVal,
+  bytesN32ToScVal,
+  structToScVal,
 } from "./utils";
 import {
   validateNonEmptyString,
@@ -574,6 +581,353 @@ export async function revokeDelegation(
     addressToScVal(delegatorPublicKey)
   );
   return invokeMethod("revoke_delegation", delegatorPublicKey, op, opts);
+}
+
+// ---------------------------------------------------------------------------
+// Insurance Claims
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a transaction to file an insurance claim against the insurance pool.
+ *
+ * @param claimantPublicKey - Address filing the claim.
+ * @param claim             - Token, amount, 32-byte evidence hash (hex), and vote deadline.
+ * @param opts              - SDK connection options.
+ */
+export async function submitInsuranceClaim(
+  claimantPublicKey: string,
+  claim: {
+    token: string;
+    amount: bigint;
+    evidenceHash: string;
+    voteDeadline: bigint;
+  },
+  opts: SdkOptions
+): Promise<string> {
+  validateNonEmptyString("claimantPublicKey", claimantPublicKey);
+  validateNonEmptyString("token", claim.token);
+  validatePositiveBigInt("amount", claim.amount);
+  validateNonNegativeBigInt("voteDeadline", claim.voteDeadline);
+
+  const contract = getContract(opts);
+  const op = contract.call(
+    "submit_insurance_claim",
+    addressToScVal(claimantPublicKey),
+    addressToScVal(claim.token),
+    i128ToScVal(claim.amount),
+    bytesN32ToScVal(claim.evidenceHash),
+    u64ToScVal(claim.voteDeadline)
+  );
+  return invokeMethod("submit_insurance_claim", claimantPublicKey, op, opts);
+}
+
+/**
+ * Build a transaction for a signer to vote on an open insurance claim.
+ *
+ * @param voterPublicKey - Signer's address.
+ * @param claimId        - ID of the claim.
+ * @param approve        - `true` to approve the claim, `false` to reject it.
+ * @param opts           - SDK connection options.
+ */
+export async function voteOnInsuranceClaim(
+  voterPublicKey: string,
+  claimId: bigint,
+  approve: boolean,
+  opts: SdkOptions
+): Promise<string> {
+  validateNonEmptyString("voterPublicKey", voterPublicKey);
+  validateId("claimId", claimId);
+
+  const contract = getContract(opts);
+  const op = contract.call(
+    "vote_on_insurance_claim",
+    addressToScVal(voterPublicKey),
+    u64ToScVal(claimId),
+    boolToScVal(approve)
+  );
+  return invokeMethod("vote_on_insurance_claim", voterPublicKey, op, opts);
+}
+
+/**
+ * Build a transaction to close voting on an insurance claim once its window has passed.
+ *
+ * @param closerPublicKey - Address closing the vote.
+ * @param claimId         - ID of the claim.
+ * @param opts            - SDK connection options.
+ */
+export async function closeInsuranceClaimVoting(
+  closerPublicKey: string,
+  claimId: bigint,
+  opts: SdkOptions
+): Promise<string> {
+  validateNonEmptyString("closerPublicKey", closerPublicKey);
+  validateId("claimId", claimId);
+
+  const contract = getContract(opts);
+  const op = contract.call(
+    "close_insurance_claim_voting",
+    addressToScVal(closerPublicKey),
+    u64ToScVal(claimId)
+  );
+  return invokeMethod("close_insurance_claim_voting", closerPublicKey, op, opts);
+}
+
+/**
+ * Fetch an insurance claim by ID.
+ *
+ * @param claimId         - ID of the claim.
+ * @param callerPublicKey - Any valid Stellar public key.
+ * @param opts            - SDK connection options.
+ */
+export async function getInsuranceClaim(
+  claimId: bigint,
+  callerPublicKey: string,
+  opts: SdkOptions
+): Promise<InsuranceClaim> {
+  validateId("claimId", claimId);
+  validateNonEmptyString("callerPublicKey", callerPublicKey);
+
+  const contract = getContract(opts);
+  const op = contract.call("get_insurance_claim", u64ToScVal(claimId));
+  const raw = await simulateReadOnly<Record<string, unknown>>(
+    op,
+    opts,
+    callerPublicKey,
+    "getInsuranceClaim"
+  );
+  return decodeInsuranceClaim(raw);
+}
+
+// ---------------------------------------------------------------------------
+// Staking
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a transaction to opt a stake into auto-compounding.
+ *
+ * @param stakerPublicKey - Address that staked against the proposal.
+ * @param proposalId      - Proposal the stake is locked against.
+ * @param opts            - SDK connection options.
+ */
+export async function enableAutoCompound(
+  stakerPublicKey: string,
+  proposalId: bigint,
+  opts: SdkOptions
+): Promise<string> {
+  validateNonEmptyString("stakerPublicKey", stakerPublicKey);
+  validateId("proposalId", proposalId);
+
+  const contract = getContract(opts);
+  const op = contract.call(
+    "enable_auto_compound",
+    addressToScVal(stakerPublicKey),
+    u64ToScVal(proposalId)
+  );
+  return invokeMethod("enable_auto_compound", stakerPublicKey, op, opts);
+}
+
+/**
+ * Build a transaction for a keeper to compound a stake's rewards.
+ *
+ * @param keeperPublicKey - Address triggering the compound.
+ * @param proposalId      - Proposal the stake is locked against.
+ * @param opts            - SDK connection options.
+ */
+export async function compoundStake(
+  keeperPublicKey: string,
+  proposalId: bigint,
+  opts: SdkOptions
+): Promise<string> {
+  validateNonEmptyString("keeperPublicKey", keeperPublicKey);
+  validateId("proposalId", proposalId);
+
+  const contract = getContract(opts);
+  const op = contract.call(
+    "compound_stake",
+    addressToScVal(keeperPublicKey),
+    u64ToScVal(proposalId)
+  );
+  return invokeMethod("compound_stake", keeperPublicKey, op, opts);
+}
+
+/**
+ * Build a transaction to replace the staking configuration. Only Admin can call this.
+ *
+ * @param adminPublicKey - Admin's address.
+ * @param config         - The full staking configuration to store.
+ * @param opts           - SDK connection options.
+ */
+export async function updateStakingConfig(
+  adminPublicKey: string,
+  config: StakingConfig,
+  opts: SdkOptions
+): Promise<string> {
+  validateNonEmptyString("adminPublicKey", adminPublicKey);
+  validateNonNegativeBigInt("minAmount", config.minAmount);
+  validateNonNegativeBigInt("maxStakeAmount", config.maxStakeAmount);
+  validateNonNegativeBigInt("compoundLockPeriod", config.compoundLockPeriod);
+  validateNonNegativeBigInt("compoundEpoch", config.compoundEpoch);
+
+  const contract = getContract(opts);
+  const op = contract.call(
+    "update_staking_config",
+    addressToScVal(adminPublicKey),
+    structToScVal({
+      enabled: boolToScVal(config.enabled),
+      min_amount: i128ToScVal(config.minAmount),
+      base_stake_bps: u32ToScVal(config.baseStakeBps),
+      max_stake_amount: i128ToScVal(config.maxStakeAmount),
+      reputation_discount_threshold: u32ToScVal(config.reputationDiscountThreshold),
+      reputation_discount_percentage: u32ToScVal(config.reputationDiscountPercentage),
+      slash_percentage: u32ToScVal(config.slashPercentage),
+      cancellation_slash_percentage: u32ToScVal(config.cancellationSlashPercentage),
+      slash_to_insurance_pool: boolToScVal(config.slashToInsurancePool),
+      compound_lock_period: u64ToScVal(config.compoundLockPeriod),
+      compound_epoch: u64ToScVal(config.compoundEpoch),
+      reward_bps_per_execution: u32ToScVal(config.rewardBpsPerExecution),
+    })
+  );
+  return invokeMethod("update_staking_config", adminPublicKey, op, opts);
+}
+
+/**
+ * Build a transaction to propose withdrawing staked funds to a recipient.
+ *
+ * @param proposerPublicKey - Address proposing the withdrawal.
+ * @param withdrawal        - Token, amount, and recipient for the withdrawal.
+ * @param opts              - SDK connection options.
+ */
+export async function proposeStakeWithdrawal(
+  proposerPublicKey: string,
+  withdrawal: { token: string; amount: bigint; recipient: string },
+  opts: SdkOptions
+): Promise<string> {
+  validateNonEmptyString("proposerPublicKey", proposerPublicKey);
+  validateNonEmptyString("token", withdrawal.token);
+  validatePositiveBigInt("amount", withdrawal.amount);
+  validateNonEmptyString("recipient", withdrawal.recipient);
+
+  const contract = getContract(opts);
+  const op = contract.call(
+    "propose_stake_withdrawal",
+    addressToScVal(proposerPublicKey),
+    addressToScVal(withdrawal.token),
+    i128ToScVal(withdrawal.amount),
+    addressToScVal(withdrawal.recipient)
+  );
+  return invokeMethod("propose_stake_withdrawal", proposerPublicKey, op, opts);
+}
+
+/**
+ * Fetch the stake record for a proposal, or `null` if none exists.
+ *
+ * @param proposalId      - Proposal the stake is locked against.
+ * @param callerPublicKey - Any valid Stellar public key.
+ * @param opts            - SDK connection options.
+ */
+export async function getStakeRecord(
+  proposalId: bigint,
+  callerPublicKey: string,
+  opts: SdkOptions
+): Promise<StakeRecord | null> {
+  validateId("proposalId", proposalId);
+  validateNonEmptyString("callerPublicKey", callerPublicKey);
+
+  const contract = getContract(opts);
+  const op = contract.call("get_stake_record", u64ToScVal(proposalId));
+  const raw = await simulateReadOnly<Record<string, unknown> | null>(
+    op,
+    opts,
+    callerPublicKey,
+    "getStakeRecord"
+  );
+  return raw ? decodeStakeRecord(raw) : null;
+}
+
+/**
+ * Fetch the current staking configuration.
+ *
+ * @param callerPublicKey - Any valid Stellar public key.
+ * @param opts            - SDK connection options.
+ */
+export async function getStakingConfig(
+  callerPublicKey: string,
+  opts: SdkOptions
+): Promise<StakingConfig> {
+  validateNonEmptyString("callerPublicKey", callerPublicKey);
+
+  const contract = getContract(opts);
+  const op = contract.call("get_staking_config");
+  const raw = await simulateReadOnly<Record<string, unknown>>(
+    op,
+    opts,
+    callerPublicKey,
+    "getStakingConfig"
+  );
+  return decodeStakingConfig(raw);
+}
+
+// ---------------------------------------------------------------------------
+// Decoders for insurance and staking reads
+// ---------------------------------------------------------------------------
+
+function decodeInsuranceClaim(raw: Record<string, unknown>): InsuranceClaim {
+  return {
+    id: raw.id as bigint,
+    claimant: raw.claimant as string,
+    amount: raw.amount as bigint,
+    evidenceHash: raw.evidence_hash as Uint8Array,
+    voteDeadline: raw.vote_deadline as bigint,
+    approveWeight: raw.approve_weight as bigint,
+    rejectWeight: raw.reject_weight as bigint,
+    token: raw.token as string,
+    bondAmount: raw.bond_amount as bigint,
+    bondSettled: raw.bond_settled as boolean,
+    status: raw.status as InsuranceClaimStatus,
+    createdAt: raw.created_at as bigint,
+    approvalThresholdBps: raw.approval_threshold_bps as number,
+    quorumBps: raw.quorum_bps as number,
+    votingWindow: raw.voting_window as bigint,
+    eligibleVoters: raw.eligible_voters as number,
+    voterCount: raw.voter_count as number,
+    votingClosed: raw.voting_closed as boolean,
+  };
+}
+
+function decodeStakeRecord(raw: Record<string, unknown>): StakeRecord {
+  return {
+    proposalId: raw.proposal_id as bigint,
+    staker: raw.staker as string,
+    token: raw.token as string,
+    amount: raw.amount as bigint,
+    lockedAt: raw.locked_at as bigint,
+    refunded: raw.refunded as boolean,
+    slashed: raw.slashed as boolean,
+    slashedAmount: raw.slashed_amount as bigint,
+    releasedAt: raw.released_at as bigint,
+    autoCompound: raw.auto_compound as boolean,
+    reinvestmentLockUntil: raw.reinvestment_lock_until as bigint,
+    lastCompounded: raw.last_compounded as bigint,
+    stakingTier: raw.staking_tier as number,
+    accumulatedRewards: raw.accumulated_rewards as bigint,
+  };
+}
+
+function decodeStakingConfig(raw: Record<string, unknown>): StakingConfig {
+  return {
+    enabled: raw.enabled as boolean,
+    minAmount: raw.min_amount as bigint,
+    baseStakeBps: raw.base_stake_bps as number,
+    maxStakeAmount: raw.max_stake_amount as bigint,
+    reputationDiscountThreshold: raw.reputation_discount_threshold as number,
+    reputationDiscountPercentage: raw.reputation_discount_percentage as number,
+    slashPercentage: raw.slash_percentage as number,
+    cancellationSlashPercentage: raw.cancellation_slash_percentage as number,
+    slashToInsurancePool: raw.slash_to_insurance_pool as boolean,
+    compoundLockPeriod: raw.compound_lock_period as bigint,
+    compoundEpoch: raw.compound_epoch as bigint,
+    rewardBpsPerExecution: raw.reward_bps_per_execution as number,
+  };
 }
 
 // ---------------------------------------------------------------------------

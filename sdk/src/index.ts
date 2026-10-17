@@ -36,6 +36,10 @@ export type {
   StateChangeEntry,
   VoteChoice,
   VotingDelegation,
+  InsuranceClaim,
+  InsuranceClaimStatus,
+  StakeRecord,
+  StakingConfig,
 } from "./types";
 
 // Enums & errors
@@ -146,6 +150,18 @@ export {
   supersedeProposal,
   delegateVotingPower,
   revokeDelegation,
+  // Insurance claims
+  submitInsuranceClaim,
+  voteOnInsuranceClaim,
+  closeInsuranceClaimVoting,
+  getInsuranceClaim,
+  // Staking
+  enableAutoCompound,
+  compoundStake,
+  updateStakingConfig,
+  proposeStakeWithdrawal,
+  getStakeRecord,
+  getStakingConfig,
 } from "./contract";
 
 // Token flows: vesting, token locks, escrow, funding rounds

@@ -595,3 +595,63 @@ export interface VotingDelegation {
   expiryLedger: bigint;
 }
 
+/** Status of an insurance claim (mirrors the contract's `InsuranceClaimStatus`). */
+export type InsuranceClaimStatus = "Pending" | "Approved" | "Rejected" | "Expired";
+
+/** An insurance claim filed against the vault's insurance pool. */
+export interface InsuranceClaim {
+  id: bigint;
+  claimant: string;
+  amount: bigint;
+  /** 32-byte hash of the off-chain evidence bundle. */
+  evidenceHash: Uint8Array;
+  voteDeadline: bigint;
+  approveWeight: bigint;
+  rejectWeight: bigint;
+  token: string;
+  bondAmount: bigint;
+  bondSettled: boolean;
+  status: InsuranceClaimStatus;
+  createdAt: bigint;
+  approvalThresholdBps: number;
+  quorumBps: number;
+  votingWindow: bigint;
+  eligibleVoters: number;
+  voterCount: number;
+  votingClosed: boolean;
+}
+
+/** Staking configuration (mirrors the contract's `StakingConfig`). */
+export interface StakingConfig {
+  enabled: boolean;
+  minAmount: bigint;
+  baseStakeBps: number;
+  maxStakeAmount: bigint;
+  reputationDiscountThreshold: number;
+  reputationDiscountPercentage: number;
+  slashPercentage: number;
+  cancellationSlashPercentage: number;
+  slashToInsurancePool: boolean;
+  compoundLockPeriod: bigint;
+  compoundEpoch: bigint;
+  rewardBpsPerExecution: number;
+}
+
+/** The stake locked against a proposal (mirrors the contract's `StakeRecord`). */
+export interface StakeRecord {
+  proposalId: bigint;
+  staker: string;
+  token: string;
+  amount: bigint;
+  lockedAt: bigint;
+  refunded: boolean;
+  slashed: boolean;
+  slashedAmount: bigint;
+  releasedAt: bigint;
+  autoCompound: boolean;
+  reinvestmentLockUntil: bigint;
+  lastCompounded: bigint;
+  stakingTier: number;
+  accumulatedRewards: bigint;
+}
+
