@@ -7424,6 +7424,7 @@ impl VaultDAO {
     /// - [`VaultError::ProposalNotFound`] if the payment does not exist.
     /// - [`VaultError::Unauthorized`] if caller is neither proposer nor Admin.
     /// - [`VaultError::RecurringPaymentStopped`] if the payment is stopping or stopped.
+    /// - [`VaultError::RecurringPaymentPaused`] if the payment is already paused.
     pub fn pause_recurring_payment(
         env: Env,
         caller: Address,
@@ -7445,6 +7446,10 @@ impl VaultDAO {
             crate::types::RecurringStatus::Stopped | crate::types::RecurringStatus::Stopping
         ) {
             return Err(VaultError::RecurringPaymentStopped);
+        }
+        // Re-pausing would overwrite paused_at_ledger and shorten the shift on resume.
+        if payment.status == crate::types::RecurringStatus::Paused {
+            return Err(VaultError::RecurringPaymentPaused);
         }
 
         payment.status = crate::types::RecurringStatus::Paused;

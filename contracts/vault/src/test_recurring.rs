@@ -688,6 +688,38 @@ fn test_resume_stopping_payment_fails_and_keeps_stop() {
 }
 
 #[test]
+fn test_repause_paused_payment_fails_and_keeps_full_pause_length() {
+    let env = Env::default();
+    let (client, admin, token, recipient) = setup(&env);
+    env.ledger().with_mut(|l| l.sequence_number = 1_000);
+
+    let payment_id = client.schedule_payment(
+        &admin,
+        &recipient,
+        &token,
+        &100i128,
+        &Symbol::new(&env, "pay"),
+        &720u64,
+        &0u32,
+        &0u32, // jitter_window
+        &0u32, // grace_executions
+    );
+    let original_next = client.get_recurring_payment(&payment_id).next_payment_ledger;
+
+    client.pause_recurring_payment(&admin, &payment_id);
+    env.ledger().with_mut(|l| l.sequence_number += 1_000);
+
+    let result = client.try_pause_recurring_payment(&admin, &payment_id);
+    assert_eq!(result, Err(Ok(VaultError::RecurringPaymentPaused)));
+
+    client.resume_recurring_payment(&admin, &payment_id);
+
+    let p = client.get_recurring_payment(&payment_id);
+    assert_eq!(p.status, crate::types::RecurringStatus::Active);
+    assert_eq!(p.next_payment_ledger, original_next + 1_000);
+}
+
+#[test]
 fn test_pause_stopping_payment_fails() {
     let env = Env::default();
     let (client, admin, token, recipient) = setup(&env);
