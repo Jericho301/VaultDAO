@@ -4560,7 +4560,7 @@ pub fn get_tag_index(env: &Env, tag: &Symbol) -> Vec<u64> {
 
 /// Derive a stable u64 hash from a Symbol for use as a DataKey discriminant.
 /// Uses the SHA-256 of the symbol's string bytes (first 8 bytes, little-endian).
-fn symbol_to_u64_key(env: &Env, tag: &Symbol) -> u64 {
+pub fn symbol_to_u64_key(env: &Env, tag: &Symbol) -> u64 {
     let tag_bytes = tag.clone().to_xdr(env);
     let hash = env.crypto().sha256(&tag_bytes);
     let hash_bytes = hash.to_array();

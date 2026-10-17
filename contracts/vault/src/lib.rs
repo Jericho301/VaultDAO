@@ -2559,6 +2559,12 @@ impl VaultDAO {
                     cause: cb_cause.clone(),
                 };
                 storage::set_pause_state(&env, &pause_state);
+                storage::create_audit_entry(
+                    &env,
+                    AuditAction::VaultPaused,
+                    &executor,
+                    storage::symbol_to_u64_key(&env, &cb_cause),
+                );
                 events::emit_vault_paused(&env, &executor, &cb_cause);
                 return Err(VaultError::VaultPaused);
             }
@@ -19341,6 +19347,12 @@ impl VaultDAO {
             cause: cause.clone(),
         };
         storage::set_pause_state(&env, &pause_state);
+        storage::create_audit_entry(
+            &env,
+            AuditAction::VaultPaused,
+            &caller,
+            storage::symbol_to_u64_key(&env, &cause),
+        );
 
         // Update cooldown ledger
         storage::update_pause_cooldown_ledger(&env);
@@ -19384,6 +19396,7 @@ impl VaultDAO {
             cause: Symbol::new(&env, "none"),
         };
         storage::set_pause_state(&env, &new_pause_state);
+        storage::create_audit_entry(&env, AuditAction::VaultUnpaused, &caller, duration);
 
         // Update cooldown ledger
         storage::update_pause_cooldown_ledger(&env);

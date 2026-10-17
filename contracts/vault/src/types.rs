@@ -1410,6 +1410,12 @@ pub enum AuditAction {
     PhaseExecuted = 29,
     /// A single phase of a multi-phase proposal failed to execute.
     PhaseFailed = 30,
+    /// Vault paused by an emergency signer or the circuit breaker (#1937).
+    /// `target` is the fingerprint of the pause cause.
+    VaultPaused = 31,
+    /// Vault unpaused by an emergency signer (#1937).
+    /// `target` is the number of ledgers the vault was paused.
+    VaultUnpaused = 32,
 }
 
 /// Audit trail entry with cryptographic verification
