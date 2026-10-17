@@ -42,6 +42,11 @@ export type {
   StakingConfig,
   ListMode,
   TokenSpendingConfig,
+  TransferDetails,
+  BatchResult,
+  SwapProposal,
+  SwapResult,
+  DexConfig,
 } from "./types";
 
 // Enums & errors
@@ -177,6 +182,16 @@ export {
   removeSupportedToken,
   setTokenLimits,
   getSupportedTokens,
+  // Batch execution
+  createBatch,
+  executeBatch,
+  batchExecuteProposals,
+  batchProposeTransfers,
+  // Swap proposals
+  proposeSwap,
+  executeSwapProposal,
+  getSwapResult,
+  setDexConfig,
 } from "./contract";
 
 // Token flows: vesting, token locks, escrow, funding rounds

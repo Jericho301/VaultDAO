@@ -31,6 +31,10 @@ import type {
   StakingConfig,
   ListMode,
   TokenSpendingConfig,
+  TransferDetails,
+  SwapProposal,
+  SwapResult,
+  DexConfig,
 } from "./types";
 import { Role, ProposalStatus, VaultError, VaultErrorCode, noopLogger } from "./types";
 import type { SdkLogger } from "./types";
@@ -65,6 +69,7 @@ import {
   validateStreamLedgers,
   validateInitConfig,
   validateAddressList,
+  validateIdList,
   SdkValidationError,
 } from "./validation";
 
@@ -1204,6 +1209,309 @@ export async function getSupportedTokens(
     weeklyLimit: entry.weekly_limit as bigint,
     isDefault: entry.is_default as boolean,
   }));
+}
+
+// ---------------------------------------------------------------------------
+// Batch Execution
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a transaction to group existing proposals into a batch.
+ *
+ * @param creatorPublicKey - Address creating the batch.
+ * @param proposalIds      - IDs of the proposals to group.
+ * @param opts             - SDK connection options.
+ */
+export async function createBatch(
+  creatorPublicKey: string,
+  proposalIds: bigint[],
+  opts: SdkOptions
+): Promise<string> {
+  validateNonEmptyString("creatorPublicKey", creatorPublicKey);
+  validateIdList("proposalIds", proposalIds);
+
+  const contract = getContract(opts);
+  const op = contract.call(
+    "create_batch",
+    addressToScVal(creatorPublicKey),
+    vecToScVal(proposalIds.map(u64ToScVal))
+  );
+  return invokeMethod("create_batch", creatorPublicKey, op, opts);
+}
+
+/**
+ * Build a transaction to execute a previously created batch.
+ *
+ * @param executorPublicKey - Address triggering execution.
+ * @param batchId           - ID of the batch from `createBatch`.
+ * @param opts              - SDK connection options.
+ */
+export async function executeBatch(
+  executorPublicKey: string,
+  batchId: bigint,
+  opts: SdkOptions
+): Promise<string> {
+  validateNonEmptyString("executorPublicKey", executorPublicKey);
+  validateId("batchId", batchId);
+
+  const contract = getContract(opts);
+  const op = contract.call(
+    "execute_batch",
+    addressToScVal(executorPublicKey),
+    u64ToScVal(batchId)
+  );
+  return invokeMethod("execute_batch", executorPublicKey, op, opts);
+}
+
+/**
+ * Build a transaction that executes many approved proposals in one contract call.
+ *
+ * Unlike executing each proposal separately, the contract applies the batch
+ * atomically. The result (executed IDs and failure count) is returned by the
+ * contract as a `BatchResult`.
+ *
+ * @param executorPublicKey - Address triggering execution.
+ * @param proposalIds       - IDs of the approved proposals to execute.
+ * @param opts              - SDK connection options.
+ */
+export async function batchExecuteProposals(
+  executorPublicKey: string,
+  proposalIds: bigint[],
+  opts: SdkOptions
+): Promise<string> {
+  validateNonEmptyString("executorPublicKey", executorPublicKey);
+  validateIdList("proposalIds", proposalIds);
+
+  const contract = getContract(opts);
+  const op = contract.call(
+    "batch_execute_proposals",
+    addressToScVal(executorPublicKey),
+    vecToScVal(proposalIds.map(u64ToScVal))
+  );
+  return invokeMethod("batch_execute_proposals", executorPublicKey, op, opts);
+}
+
+/**
+ * Build a transaction that proposes many transfers in one contract call.
+ *
+ * Defaults to `Normal` priority, no conditions (AND logic), and no insurance.
+ *
+ * @param proposerPublicKey - Address proposing the transfers.
+ * @param transfers         - Recipient, token, and amount for each transfer.
+ * @param options          - Optional priority and insurance amount.
+ * @param opts              - SDK connection options.
+ */
+export async function batchProposeTransfers(
+  proposerPublicKey: string,
+  transfers: TransferDetails[],
+  options: {
+    priority?: "Low" | "Normal" | "High" | "Critical";
+    insuranceAmount?: bigint;
+  },
+  opts: SdkOptions
+): Promise<string> {
+  validateNonEmptyString("proposerPublicKey", proposerPublicKey);
+  if (transfers.length === 0) {
+    throw new SdkValidationError("transfers", transfers, "transfers must not be empty");
+  }
+  transfers.forEach((transfer, index) => {
+    validateNonEmptyString(`transfers[${index}].recipient`, transfer.recipient);
+    validateNonEmptyString(`transfers[${index}].token`, transfer.token);
+    validatePositiveBigInt(`transfers[${index}].amount`, transfer.amount);
+  });
+  const insuranceAmount = options.insuranceAmount ?? 0n;
+  validateNonNegativeBigInt("insuranceAmount", insuranceAmount);
+
+  const contract = getContract(opts);
+  const op = contract.call(
+    "batch_propose_transfers",
+    addressToScVal(proposerPublicKey),
+    vecToScVal(
+      transfers.map((transfer) =>
+        structToScVal({
+          recipient: addressToScVal(transfer.recipient),
+          token: addressToScVal(transfer.token),
+          amount: i128ToScVal(transfer.amount),
+        })
+      )
+    ),
+    enumToScVal(options.priority ?? "Normal"),
+    vecToScVal([]),
+    enumToScVal("And"),
+    i128ToScVal(insuranceAmount)
+  );
+  return invokeMethod("batch_propose_transfers", proposerPublicKey, op, opts);
+}
+
+// ---------------------------------------------------------------------------
+// Swap Proposals
+// ---------------------------------------------------------------------------
+
+/** @internal Encode a `SwapProposal` as its Soroban enum variant. */
+function swapProposalToScVal(swap: SwapProposal): xdr.ScVal {
+  switch (swap.type) {
+    case "Swap":
+      return enumToScVal("Swap", [
+        addressToScVal(swap.dex),
+        addressToScVal(swap.tokenIn),
+        addressToScVal(swap.tokenOut),
+        i128ToScVal(swap.amountIn),
+        i128ToScVal(swap.minAmountOut),
+      ]);
+    case "AddLiquidity":
+      return enumToScVal("AddLiquidity", [
+        addressToScVal(swap.dex),
+        addressToScVal(swap.tokenA),
+        addressToScVal(swap.tokenB),
+        i128ToScVal(swap.amountA),
+        i128ToScVal(swap.amountB),
+        i128ToScVal(swap.minLpTokens),
+      ]);
+    case "RemoveLiquidity":
+      return enumToScVal("RemoveLiquidity", [
+        addressToScVal(swap.dex),
+        addressToScVal(swap.lpToken),
+        i128ToScVal(swap.amount),
+        i128ToScVal(swap.minTokenA),
+        i128ToScVal(swap.minTokenB),
+      ]);
+    case "StakeLp":
+      return enumToScVal("StakeLp", [
+        addressToScVal(swap.farm),
+        addressToScVal(swap.lpToken),
+        i128ToScVal(swap.amount),
+      ]);
+    case "UnstakeLp":
+      return enumToScVal("UnstakeLp", [
+        addressToScVal(swap.farm),
+        addressToScVal(swap.lpToken),
+        i128ToScVal(swap.amount),
+      ]);
+    case "ClaimRewards":
+      return enumToScVal("ClaimRewards", [addressToScVal(swap.farm)]);
+  }
+}
+
+/**
+ * Build a transaction to propose a DEX swap or liquidity action.
+ *
+ * Defaults to `Normal` priority, no conditions (AND logic), and no insurance.
+ *
+ * @param proposerPublicKey - Address proposing the swap.
+ * @param swap              - The swap or liquidity action to propose.
+ * @param options           - Optional priority and insurance amount.
+ * @param opts              - SDK connection options.
+ */
+export async function proposeSwap(
+  proposerPublicKey: string,
+  swap: SwapProposal,
+  options: {
+    priority?: "Low" | "Normal" | "High" | "Critical";
+    insuranceAmount?: bigint;
+  },
+  opts: SdkOptions
+): Promise<string> {
+  validateNonEmptyString("proposerPublicKey", proposerPublicKey);
+  const insuranceAmount = options.insuranceAmount ?? 0n;
+  validateNonNegativeBigInt("insuranceAmount", insuranceAmount);
+
+  const contract = getContract(opts);
+  const op = contract.call(
+    "propose_swap",
+    addressToScVal(proposerPublicKey),
+    swapProposalToScVal(swap),
+    enumToScVal(options.priority ?? "Normal"),
+    vecToScVal([]),
+    enumToScVal("And"),
+    i128ToScVal(insuranceAmount)
+  );
+  return invokeMethod("propose_swap", proposerPublicKey, op, opts);
+}
+
+/**
+ * Build a transaction to execute an approved swap proposal.
+ *
+ * @param executorPublicKey - Address triggering execution.
+ * @param proposalId        - ID of the swap proposal.
+ * @param opts              - SDK connection options.
+ */
+export async function executeSwapProposal(
+  executorPublicKey: string,
+  proposalId: bigint,
+  opts: SdkOptions
+): Promise<string> {
+  validateNonEmptyString("executorPublicKey", executorPublicKey);
+  validateId("proposalId", proposalId);
+
+  const contract = getContract(opts);
+  const op = contract.call(
+    "execute_swap_proposal",
+    addressToScVal(executorPublicKey),
+    u64ToScVal(proposalId)
+  );
+  return invokeMethod("execute_swap_proposal", executorPublicKey, op, opts);
+}
+
+/**
+ * Fetch the recorded result of an executed swap, or `null` if it has not run.
+ *
+ * @param proposalId      - ID of the swap proposal.
+ * @param callerPublicKey - Any valid Stellar public key.
+ * @param opts            - SDK connection options.
+ */
+export async function getSwapResult(
+  proposalId: bigint,
+  callerPublicKey: string,
+  opts: SdkOptions
+): Promise<SwapResult | null> {
+  validateId("proposalId", proposalId);
+  validateNonEmptyString("callerPublicKey", callerPublicKey);
+
+  const contract = getContract(opts);
+  const op = contract.call("get_swap_result", u64ToScVal(proposalId));
+  const raw = await simulateReadOnly<Record<string, unknown> | null>(
+    op,
+    opts,
+    callerPublicKey,
+    "getSwapResult"
+  );
+  if (!raw) return null;
+  return {
+    amountIn: raw.amount_in as bigint,
+    amountOut: raw.amount_out as bigint,
+    priceImpactBps: raw.price_impact_bps as number,
+    executedAt: raw.executed_at as bigint,
+  };
+}
+
+/**
+ * Build a transaction to set DEX routing and safety limits. Only Admin can call this.
+ *
+ * @param adminPublicKey - Admin's address.
+ * @param config         - Enabled DEXs, slippage and price-impact caps, and minimum liquidity.
+ * @param opts           - SDK connection options.
+ */
+export async function setDexConfig(
+  adminPublicKey: string,
+  config: DexConfig,
+  opts: SdkOptions
+): Promise<string> {
+  validateNonEmptyString("adminPublicKey", adminPublicKey);
+  validateAddressList("enabledDexs", config.enabledDexs);
+  validateNonNegativeBigInt("minLiquidity", config.minLiquidity);
+
+  const contract = getContract(opts);
+  const op = contract.call(
+    "set_dex_config",
+    addressToScVal(adminPublicKey),
+    structToScVal({
+      enabled_dexs: vecToScVal(config.enabledDexs.map(addressToScVal)),
+      max_slippage_bps: u32ToScVal(config.maxSlippageBps),
+      max_price_impact_bps: u32ToScVal(config.maxPriceImpactBps),
+      min_liquidity: i128ToScVal(config.minLiquidity),
+    })
+  );
+  return invokeMethod("set_dex_config", adminPublicKey, op, opts);
 }
 
 // ---------------------------------------------------------------------------

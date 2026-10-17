@@ -666,3 +666,63 @@ export interface TokenSpendingConfig {
   isDefault: boolean;
 }
 
+/** One transfer inside a `batch_propose_transfers` call (mirrors `TransferDetails`). */
+export interface TransferDetails {
+  recipient: string;
+  token: string;
+  amount: bigint;
+}
+
+/** Outcome of `batch_execute_proposals`: IDs that executed and how many failed. */
+export interface BatchResult {
+  executedIds: bigint[];
+  failedCount: number;
+}
+
+/** Swap or liquidity action proposed against a DEX (mirrors the contract's `SwapProposal`). */
+export type SwapProposal =
+  | {
+      type: "Swap";
+      dex: string;
+      tokenIn: string;
+      tokenOut: string;
+      amountIn: bigint;
+      minAmountOut: bigint;
+    }
+  | {
+      type: "AddLiquidity";
+      dex: string;
+      tokenA: string;
+      tokenB: string;
+      amountA: bigint;
+      amountB: bigint;
+      minLpTokens: bigint;
+    }
+  | {
+      type: "RemoveLiquidity";
+      dex: string;
+      lpToken: string;
+      amount: bigint;
+      minTokenA: bigint;
+      minTokenB: bigint;
+    }
+  | { type: "StakeLp"; farm: string; lpToken: string; amount: bigint }
+  | { type: "UnstakeLp"; farm: string; lpToken: string; amount: bigint }
+  | { type: "ClaimRewards"; farm: string };
+
+/** Result recorded for an executed swap (mirrors the contract's `SwapResult`). */
+export interface SwapResult {
+  amountIn: bigint;
+  amountOut: bigint;
+  priceImpactBps: number;
+  executedAt: bigint;
+}
+
+/** DEX routing and safety configuration (mirrors the contract's `DexConfig`). */
+export interface DexConfig {
+  enabledDexs: string[];
+  maxSlippageBps: number;
+  maxPriceImpactBps: number;
+  minLiquidity: bigint;
+}
+

@@ -87,6 +87,14 @@ import {
   removeSupportedToken,
   setTokenLimits,
   getSupportedTokens,
+  createBatch,
+  executeBatch,
+  batchExecuteProposals,
+  batchProposeTransfers,
+  proposeSwap,
+  executeSwapProposal,
+  getSwapResult,
+  setDexConfig,
 } from "./contract";
 import {
   getContract,
@@ -126,7 +134,9 @@ vi.mock("./utils", () => ({
   u64ToScVal: vi.fn((v: unknown) => `u64:${v}`),
   u32ToScVal: vi.fn((v: unknown) => `u32:${v}`),
   symbolToScVal: vi.fn((v: unknown) => `sym:${v}`),
-  enumToScVal: vi.fn((v: unknown) => `enum:${v}`),
+  enumToScVal: vi.fn((v: unknown, payload: unknown[] = []) =>
+    payload.length ? `enum:${v}:${payload.join("|")}` : `enum:${v}`,
+  ),
   vecToScVal: vi.fn((v: unknown[]) => `vec:${v.length}`),
   boolToScVal: vi.fn((v: unknown) => `bool:${v}`),
   bytesN32ToScVal: vi.fn((v: unknown) => `bytes32:${v}`),
@@ -593,6 +603,229 @@ describe("contract.ts bindings", () => {
         addSupportedToken(
           "GADMIN",
           { token: "CTOKEN", dailyLimit: -1n, weeklyLimit: 0n },
+          opts,
+        ),
+      ).rejects.toThrow();
+      expect(buildTransaction).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("Batch Execution and Swaps", () => {
+    it("createBatch encodes creator and the proposal ID vec", async () => {
+      await createBatch("GCREATOR", [1n, 2n, 3n], opts);
+      expect(contractCallSpy).toHaveBeenCalledWith(
+        "create_batch",
+        "addr:GCREATOR",
+        "vec:3",
+      );
+    });
+
+    it("executeBatch encodes executor and batch id", async () => {
+      await executeBatch("GEXEC", 4n, opts);
+      expect(contractCallSpy).toHaveBeenCalledWith(
+        "execute_batch",
+        "addr:GEXEC",
+        "u64:4",
+      );
+    });
+
+    it("batchExecuteProposals encodes executor and the proposal ID vec", async () => {
+      const xdr = await batchExecuteProposals("GEXEC", [5n, 6n], opts);
+      expect(xdr).toBe("FAKE_TX_XDR");
+      expect(contractCallSpy).toHaveBeenCalledWith(
+        "batch_execute_proposals",
+        "addr:GEXEC",
+        "vec:2",
+      );
+    });
+
+    it("batchProposeTransfers encodes one struct per transfer with default priority and logic", async () => {
+      await batchProposeTransfers(
+        "GPROP",
+        [
+          { recipient: "GA", token: "CTOKEN", amount: 10n },
+          { recipient: "GB", token: "CTOKEN", amount: 20n },
+        ],
+        {},
+        opts,
+      );
+      expect(contractCallSpy).toHaveBeenCalledWith(
+        "batch_propose_transfers",
+        "addr:GPROP",
+        "vec:2",
+        "enum:Normal",
+        "vec:0",
+        "enum:And",
+        "i128:0",
+      );
+    });
+
+    it("batchProposeTransfers forwards explicit priority and insurance", async () => {
+      await batchProposeTransfers(
+        "GPROP",
+        [{ recipient: "GA", token: "CTOKEN", amount: 10n }],
+        { priority: "High", insuranceAmount: 5n },
+        opts,
+      );
+      expect(contractCallSpy).toHaveBeenCalledWith(
+        "batch_propose_transfers",
+        "addr:GPROP",
+        "vec:1",
+        "enum:High",
+        "vec:0",
+        "enum:And",
+        "i128:5",
+      );
+    });
+
+    it("proposeSwap encodes a Swap variant with its payload", async () => {
+      await proposeSwap(
+        "GPROP",
+        {
+          type: "Swap",
+          dex: "GDEX",
+          tokenIn: "CA",
+          tokenOut: "CB",
+          amountIn: 100n,
+          minAmountOut: 90n,
+        },
+        {},
+        opts,
+      );
+      expect(contractCallSpy).toHaveBeenCalledWith(
+        "propose_swap",
+        "addr:GPROP",
+        "enum:Swap:addr:GDEX|addr:CA|addr:CB|i128:100|i128:90",
+        "enum:Normal",
+        "vec:0",
+        "enum:And",
+        "i128:0",
+      );
+    });
+
+    it("proposeSwap encodes each liquidity and farm variant", async () => {
+      await proposeSwap(
+        "GPROP",
+        {
+          type: "AddLiquidity",
+          dex: "GDEX",
+          tokenA: "CA",
+          tokenB: "CB",
+          amountA: 1n,
+          amountB: 2n,
+          minLpTokens: 3n,
+        },
+        {},
+        opts,
+      );
+      await proposeSwap(
+        "GPROP",
+        { type: "ClaimRewards", farm: "GFARM" },
+        {},
+        opts,
+      );
+      expect(contractCallSpy).toHaveBeenCalledWith(
+        "propose_swap",
+        "addr:GPROP",
+        "enum:AddLiquidity:addr:GDEX|addr:CA|addr:CB|i128:1|i128:2|i128:3",
+        "enum:Normal",
+        "vec:0",
+        "enum:And",
+        "i128:0",
+      );
+      expect(contractCallSpy).toHaveBeenCalledWith(
+        "propose_swap",
+        "addr:GPROP",
+        "enum:ClaimRewards:addr:GFARM",
+        "enum:Normal",
+        "vec:0",
+        "enum:And",
+        "i128:0",
+      );
+    });
+
+    it("executeSwapProposal encodes executor and proposal id", async () => {
+      await executeSwapProposal("GEXEC", 8n, opts);
+      expect(contractCallSpy).toHaveBeenCalledWith(
+        "execute_swap_proposal",
+        "addr:GEXEC",
+        "u64:8",
+      );
+    });
+
+    it("getSwapResult returns null when no swap has run", async () => {
+      serverMock.getAccount.mockResolvedValue({ accountId: () => "GCALLER" });
+      serverMock.simulateTransaction.mockResolvedValue({
+        transactionData: {},
+        result: { retval: {} },
+      });
+      (decodeScVal as Mock).mockReturnValue(null);
+
+      await expect(getSwapResult(8n, "GCALLER", opts)).resolves.toBeNull();
+    });
+
+    it("getSwapResult decodes a recorded swap", async () => {
+      serverMock.getAccount.mockResolvedValue({ accountId: () => "GCALLER" });
+      serverMock.simulateTransaction.mockResolvedValue({
+        transactionData: {},
+        result: { retval: {} },
+      });
+      (decodeScVal as Mock).mockReturnValue({
+        amount_in: 100n,
+        amount_out: 97n,
+        price_impact_bps: 12,
+        executed_at: 1234n,
+      });
+
+      await expect(getSwapResult(8n, "GCALLER", opts)).resolves.toEqual({
+        amountIn: 100n,
+        amountOut: 97n,
+        priceImpactBps: 12,
+        executedAt: 1234n,
+      });
+    });
+
+    it("setDexConfig encodes the DEX list and limits as a struct", async () => {
+      await setDexConfig(
+        "GADMIN",
+        {
+          enabledDexs: ["GDEX1", "GDEX2"],
+          maxSlippageBps: 100,
+          maxPriceImpactBps: 500,
+          minLiquidity: 1000n,
+        },
+        opts,
+      );
+      expect(contractCallSpy).toHaveBeenCalledWith(
+        "set_dex_config",
+        "addr:GADMIN",
+        {
+          enabled_dexs: "vec:2",
+          max_slippage_bps: "u32:100",
+          max_price_impact_bps: "u32:500",
+          min_liquidity: "i128:1000",
+        },
+      );
+    });
+
+    it("rejects invalid inputs before building a transaction", async () => {
+      await expect(createBatch("GCREATOR", [], opts)).rejects.toThrow();
+      await expect(batchExecuteProposals("GEXEC", [0n], opts)).rejects.toThrow();
+      await expect(
+        batchProposeTransfers("GPROP", [], {}, opts),
+      ).rejects.toThrow();
+      await expect(
+        batchProposeTransfers(
+          "GPROP",
+          [{ recipient: "GA", token: "CTOKEN", amount: 0n }],
+          {},
+          opts,
+        ),
+      ).rejects.toThrow();
+      await expect(
+        setDexConfig(
+          "GADMIN",
+          { enabledDexs: [], maxSlippageBps: 0, maxPriceImpactBps: 0, minLiquidity: 0n },
           opts,
         ),
       ).rejects.toThrow();
