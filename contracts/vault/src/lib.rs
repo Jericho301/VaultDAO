@@ -7199,6 +7199,18 @@ impl VaultDAO {
             return Err(VaultError::ExceedsWeeklyLimit);
         }
 
+        // Same per-token caps that propose_transfer_internal enforces (#1440).
+        if let Some(token_cfg) = storage::get_token_spending_config(&env, &payment.token) {
+            let token_spent_today = storage::get_token_daily_spent(&env, &payment.token, today);
+            if token_spent_today + total_amount > token_cfg.daily_limit {
+                return Err(VaultError::ExceedsTokenDailyLimit);
+            }
+            let token_spent_week = storage::get_token_weekly_spent(&env, &payment.token, week);
+            if token_spent_week + total_amount > token_cfg.weekly_limit {
+                return Err(VaultError::ExceedsTokenWeeklyLimit);
+            }
+        }
+
         // Revalidate recipient against current whitelist/blacklist policies.
         Self::validate_recipient(&env, &payment.recipient)?;
 
@@ -7238,6 +7250,8 @@ impl VaultDAO {
         // Update limits with total amount
         storage::add_daily_spent(&env, today, total_amount);
         storage::add_weekly_spent(&env, week, total_amount);
+        storage::add_token_daily_spent(&env, &payment.token, today, total_amount);
+        storage::add_token_weekly_spent(&env, &payment.token, week, total_amount);
 
         // Update payment schedule.
         // After the first payment (payment_count was 0), apply jitter to all subsequent cycles.

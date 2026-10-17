@@ -825,6 +825,75 @@ fn test_stop_pause_resume_blocked_while_vault_paused() {
 }
 
 // ============================================================================
+// Issue #1919: Recurring execution must respect per-token spending limits
+// ============================================================================
+
+#[test]
+fn test_execute_recurring_payment_above_token_daily_limit_fails() {
+    let env = Env::default();
+    let (client, admin, token, recipient) = setup(&env);
+
+    client.set_token_limits(&admin, &token, &150i128, &1_000i128);
+
+    let payment_id = client.schedule_payment(
+        &admin,
+        &recipient,
+        &token,
+        &200i128,
+        &Symbol::new(&env, "pay"),
+        &720u64,
+        &0u32,
+        &0u32, // jitter_window
+        &0u32, // grace_executions
+    );
+
+    env.ledger().with_mut(|l| l.sequence_number += 800);
+
+    let result = client.try_execute_recurring_payment(&payment_id);
+    assert_eq!(result, Err(Ok(VaultError::ExceedsTokenDailyLimit)));
+}
+
+#[test]
+fn test_execute_recurring_payment_counts_against_token_daily_limit() {
+    let env = Env::default();
+    let (client, admin, token, recipient) = setup(&env);
+
+    client.set_token_limits(&admin, &token, &150i128, &1_000i128);
+
+    let first_id = client.schedule_payment(
+        &admin,
+        &recipient,
+        &token,
+        &100i128,
+        &Symbol::new(&env, "pay"),
+        &720u64,
+        &0u32,
+        &0u32, // jitter_window
+        &0u32, // grace_executions
+    );
+    let second_id = client.schedule_payment(
+        &admin,
+        &recipient,
+        &token,
+        &100i128,
+        &Symbol::new(&env, "pay"),
+        &720u64,
+        &0u32,
+        &0u32, // jitter_window
+        &0u32, // grace_executions
+    );
+
+    env.ledger().with_mut(|l| l.sequence_number += 800);
+
+    // First execution fits under the 150 cap and is recorded against it.
+    client.execute_recurring_payment(&first_id);
+
+    // Second execution would bring the token total to 200, above the cap.
+    let result = client.try_execute_recurring_payment(&second_id);
+    assert_eq!(result, Err(Ok(VaultError::ExceedsTokenDailyLimit)));
+}
+
+// ============================================================================
 // Issue #1088: Recurring Payment Jitter Tests
 // ============================================================================
 
