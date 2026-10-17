@@ -386,6 +386,8 @@ mod test_streaming;
 #[cfg(test)]
 mod test_stream_rate_accrual;
 #[cfg(test)]
+mod test_stream_create_validation;
+#[cfg(test)]
 mod test_trigger_stream_payment_accrual;
 #[cfg(test)]
 mod test_notification_prefs;
