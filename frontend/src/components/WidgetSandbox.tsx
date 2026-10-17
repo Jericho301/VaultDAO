@@ -5,6 +5,7 @@ import { useToast } from '../hooks/useToast';
 import { useProposals } from '../hooks/useProposals';
 import { useVaultContract } from '../hooks/useVaultContract';
 import type { InstalledWidget, WidgetMessage, WidgetEventType } from '../types/widget';
+import { getNewProposalsSince } from '../utils/widgetProposalEvents';
 
 interface WidgetSandboxProps {
   widget: InstalledWidget;
@@ -19,6 +20,7 @@ interface WidgetSandboxProps {
  */
 const WidgetSandbox: React.FC<WidgetSandboxProps> = ({ widget, onLoad, onError, onRemove }) => {
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  const highestSeenIdRef = useRef<bigint | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [isExpanded, setIsExpanded] = useState(false);
@@ -127,16 +129,20 @@ const WidgetSandbox: React.FC<WidgetSandboxProps> = ({ widget, onLoad, onError, 
     }
   };
 
-  // Watch for proposal changes to fire events
+  // Watch for proposal changes to fire events. Only proposals with an id above
+  // the highest one already seen are emitted, so refetches do not re-fire.
   useEffect(() => {
-    if (activeSubscriptions.has('proposalCreated') && proposals.length > 0) {
-      // In a real scenario, we'd only fire this for the *newest* proposal
-      // For the sandbox demo, we'll just emit the latest one if it's new
+    const { highestSeenId, newProposals } = getNewProposalsSince(proposals, highestSeenIdRef.current);
+    highestSeenIdRef.current = highestSeenId;
+
+    if (!activeSubscriptions.has('proposalCreated')) return;
+
+    for (const proposal of newProposals) {
       iframeRef.current?.contentWindow?.postMessage({
         type: 'event',
         payload: {
           eventType: 'proposalCreated',
-          data: proposals[0]
+          data: proposal
         },
         widgetId: widget.id
       }, '*');
