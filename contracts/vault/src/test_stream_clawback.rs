@@ -448,3 +448,64 @@ fn test_clawback_with_nothing_unvested_is_rejected() {
     );
     assert_eq!(f.token.balance(&f.sender), 0);
 }
+
+#[test]
+fn test_close_fully_claimed_stream_succeeds() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let f = setup(&env);
+
+    advance(&env, DURATION);
+    f.client.claim_stream(&f.recipient, &f.stream_id);
+    assert_eq!(
+        f.client.get_stream(&f.stream_id).status,
+        StreamStatus::Completed
+    );
+
+    f.client.close_stream(&f.sender, &f.stream_id);
+
+    assert_eq!(
+        f.client.get_stream(&f.stream_id).status,
+        StreamStatus::Completed
+    );
+    assert_eq!(f.token.balance(&f.recipient), TOTAL);
+    assert_eq!(f.token.balance(&f.client.address), 0);
+}
+
+#[test]
+fn test_close_funded_stream_is_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let f = setup(&env);
+
+    advance(&env, 300);
+    assert_eq!(
+        f.client.try_close_stream(&f.sender, &f.stream_id),
+        Err(Ok(VaultError::StreamNotFullyClaimed))
+    );
+
+    // The stream stays live and the recipient can still claim what is owed
+    assert_eq!(
+        f.client.get_stream(&f.stream_id).status,
+        StreamStatus::Active
+    );
+    let claimed = f.client.claim_stream(&f.recipient, &f.stream_id);
+    assert_eq!(claimed, 300 * RATE);
+    assert_eq!(f.token.balance(&f.recipient), 300 * RATE);
+}
+
+#[test]
+fn test_close_by_unrelated_address_is_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let f = setup(&env);
+
+    let outsider = Address::generate(&env);
+    advance(&env, DURATION);
+    f.client.claim_stream(&f.recipient, &f.stream_id);
+
+    assert_eq!(
+        f.client.try_close_stream(&outsider, &f.stream_id),
+        Err(Ok(VaultError::Unauthorized))
+    );
+}

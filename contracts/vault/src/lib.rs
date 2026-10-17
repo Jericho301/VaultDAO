@@ -8081,7 +8081,16 @@ impl VaultDAO {
         storage::get_clawback_request(&env, clawback_id)
     }
 
-    /// Close an active stream and clean up its rate window (Issue #1724, #1536).
+    /// Close a stream and clean up its rate window (Issue #1724, #1536, #1912).
+    ///
+    /// A live (Active or Paused) stream can only be closed once the recipient has
+    /// claimed all of it. Closing therefore never freezes funds the recipient is
+    /// still owed, and no reserve is left to release. Cancelled and Completed
+    /// streams have already released their reserve, so closing them only clears
+    /// the rate window.
+    ///
+    /// # Errors
+    /// Returns [`VaultError::StreamNotFullyClaimed`] if a live stream still has unclaimed funds.
     pub fn close_stream(
         env: Env,
         caller: Address,
@@ -8093,9 +8102,20 @@ impl VaultDAO {
         if stream.sender != caller && role != Role::Admin {
             return Err(VaultError::Unauthorized);
         }
+        let is_live =
+            stream.status == StreamStatus::Active || stream.status == StreamStatus::Paused;
+        if is_live && stream.claimed_amount < stream.total_amount {
+            return Err(VaultError::StreamNotFullyClaimed);
+        }
         stream.status = StreamStatus::Completed;
         storage::set_streaming_payment(&env, &stream);
         storage::remove_stream_rate_window(&env, stream_id);
+        events::emit_stream_status_updated(
+            &env,
+            stream_id,
+            StreamStatus::Completed as u32,
+            &caller,
+        );
         Ok(())
     }
 
