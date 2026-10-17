@@ -8014,13 +8014,26 @@ impl VaultDAO {
             amount,
             reason,
             status: ClawbackStatus::Pending,
+            approvals: 0,
+            votes: 0,
         };
         storage::set_clawback_request(&env, &req);
         storage::extend_instance_ttl(&env);
         Ok(id)
     }
 
-    /// Vote to approve or reject a stream clawback request (Issue #1724).
+    /// Vote to approve or reject a stream clawback request (Issue #1724, #1911).
+    ///
+    /// Only a Pending request accepts votes, and each Admin or Treasurer may vote
+    /// once. The requester cannot approve their own request. A rejection finalises
+    /// the request immediately. An approval only moves it to Approved once approvals
+    /// reach `config.threshold` and total votes reach `config.quorum` (0 disables
+    /// the quorum check).
+    ///
+    /// # Errors
+    /// * `ProposalNotPending` - request is no longer Pending.
+    /// * `ClaimSelfVote`      - requester attempting to approve their own request.
+    /// * `ClaimAlreadyVoted`  - voter has already voted on this request.
     pub fn vote_clawback(
         env: Env,
         caller: Address,
@@ -8033,13 +8046,30 @@ impl VaultDAO {
             return Err(VaultError::InsufficientRole);
         }
         let mut req = storage::get_clawback_request(&env, clawback_id)?;
+        if req.status != ClawbackStatus::Pending {
+            return Err(VaultError::ProposalNotPending);
+        }
+        if approve && caller == req.requester {
+            return Err(VaultError::ClaimSelfVote);
+        }
+        if storage::has_voted_on_clawback(&env, clawback_id, &caller) {
+            return Err(VaultError::ClaimAlreadyVoted);
+        }
+        storage::record_clawback_vote(&env, clawback_id, &caller);
+        req.votes += 1;
+
         if approve {
-            req.status = ClawbackStatus::Approved;
-            storage::remove_stream_rate_window(&env, req.stream_id);
+            req.approvals += 1;
+            let config = storage::get_config(&env)?;
+            let quorum_met = config.quorum == 0 || req.votes >= config.quorum;
+            if req.approvals >= config.threshold && quorum_met {
+                req.status = ClawbackStatus::Approved;
+            }
         } else {
             req.status = ClawbackStatus::Rejected;
         }
         storage::set_clawback_request(&env, &req);
+        storage::extend_instance_ttl(&env);
         Ok(())
     }
 

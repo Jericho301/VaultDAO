@@ -1,13 +1,17 @@
 //! Tests for recalling unstreamed funds from a stream (Issue #1443).
 //!
-//! The contract has no separate clawback-vote flow; unstreamed funds are
-//! recalled with `cancel_stream`, which refunds everything not yet earned to
-//! the stream sender. These tests cover that recall path:
+//! Unstreamed funds can be recalled two ways: `cancel_stream` refunds everything
+//! not yet earned to the stream sender, and a multi-signer clawback request
+//! (`request_stream_clawback` -> `vote_clawback` -> `execute_clawback`) recalls
+//! only the requested, unvested portion. These tests cover both paths:
 //! 1. Cancelling refunds the unearned remainder to the sender
-//! 2. Tokens already claimed by the recipient are kept
-//! 3. Only the sender or an Admin can recall
-//! 4. A stream cannot be recalled twice, or after it completed
-//! 5. Recalling a nonexistent stream fails
+//! 2. Cancelling pays the recipient's accrued but unclaimed funds
+//! 3. Tokens already claimed by the recipient are kept
+//! 4. Only the sender or an Admin can recall
+//! 5. A stream cannot be recalled twice, or after it completed
+//! 6. Recalling a nonexistent stream fails
+//! 7. Clawback votes need the threshold, reject revotes, block self-approval
+//!    and never allow a request to be executed twice (Issue #1911)
 #![cfg(test)]
 
 use crate::errors::VaultError;
@@ -252,16 +256,135 @@ fn test_recall_nonexistent_stream_fails() {
     assert!(f.client.try_cancel_stream(&f.admin, &999u64).is_err());
 }
 
-/// Requests a clawback from `admin` and approves it with the sender's vote.
+/// Requests a clawback from `admin` and approves it with two Treasurer votes,
+/// meeting the signer threshold of 2.
 fn approve_clawback(f: &Fixture<'_>, env: &Env, amount: i128) -> u64 {
-    let id = f.client.request_stream_clawback(
+    let id = request_clawback(f, env, amount);
+    f.client.vote_clawback(&f.sender, &id, &true);
+    let second = Address::generate(env);
+    f.client.set_role(&f.admin, &second, &Role::Treasurer);
+    f.client.vote_clawback(&second, &id, &true);
+    id
+}
+
+/// Requests a clawback from `admin` without voting on it.
+fn request_clawback(f: &Fixture<'_>, env: &Env, amount: i128) -> u64 {
+    f.client.request_stream_clawback(
         &f.admin,
         &f.stream_id,
         &amount,
         &Symbol::new(env, "recall"),
-    );
+    )
+}
+
+#[test]
+fn test_clawback_stays_pending_until_threshold_reached() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let f = setup(&env);
+
+    let id = request_clawback(&f, &env, 200);
     f.client.vote_clawback(&f.sender, &id, &true);
-    id
+    assert_eq!(
+        f.client.get_clawback_request(&id).status,
+        ClawbackStatus::Pending
+    );
+    assert_eq!(
+        f.client.try_execute_clawback(&f.admin, &id),
+        Err(Ok(VaultError::ProposalNotPending))
+    );
+
+    let second = Address::generate(&env);
+    f.client.set_role(&f.admin, &second, &Role::Treasurer);
+    f.client.vote_clawback(&second, &id, &true);
+    assert_eq!(
+        f.client.get_clawback_request(&id).status,
+        ClawbackStatus::Approved
+    );
+}
+
+#[test]
+fn test_clawback_revote_is_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let f = setup(&env);
+
+    let id = request_clawback(&f, &env, 200);
+    f.client.vote_clawback(&f.sender, &id, &true);
+    assert_eq!(
+        f.client.try_vote_clawback(&f.sender, &id, &true),
+        Err(Ok(VaultError::ClaimAlreadyVoted))
+    );
+    assert_eq!(
+        f.client.try_vote_clawback(&f.sender, &id, &false),
+        Err(Ok(VaultError::ClaimAlreadyVoted))
+    );
+    assert_eq!(f.client.get_clawback_request(&id).approvals, 1);
+}
+
+#[test]
+fn test_requester_cannot_approve_own_clawback() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let f = setup(&env);
+
+    let id = request_clawback(&f, &env, 200);
+    assert_eq!(
+        f.client.try_vote_clawback(&f.admin, &id, &true),
+        Err(Ok(VaultError::ClaimSelfVote))
+    );
+    assert_eq!(
+        f.client.get_clawback_request(&id).status,
+        ClawbackStatus::Pending
+    );
+}
+
+#[test]
+fn test_executed_clawback_cannot_be_voted_or_executed_again() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let f = setup(&env);
+
+    advance(&env, 300);
+    let id = approve_clawback(&f, &env, 200);
+    f.client.execute_clawback(&f.admin, &id);
+
+    assert_eq!(
+        f.client.try_vote_clawback(&f.sender, &id, &true),
+        Err(Ok(VaultError::ProposalNotPending))
+    );
+    assert_eq!(
+        f.client.try_execute_clawback(&f.admin, &id),
+        Err(Ok(VaultError::ProposalNotPending))
+    );
+    // Only the single recall happened
+    assert_eq!(f.token.balance(&f.sender), 200);
+    assert_eq!(f.client.get_stream(&f.stream_id).total_amount, TOTAL - 200);
+}
+
+#[test]
+fn test_rejected_clawback_cannot_be_approved_later() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let f = setup(&env);
+
+    let id = request_clawback(&f, &env, 200);
+    f.client.vote_clawback(&f.sender, &id, &false);
+    assert_eq!(
+        f.client.get_clawback_request(&id).status,
+        ClawbackStatus::Rejected
+    );
+
+    let second = Address::generate(&env);
+    f.client.set_role(&f.admin, &second, &Role::Treasurer);
+    assert_eq!(
+        f.client.try_vote_clawback(&second, &id, &true),
+        Err(Ok(VaultError::ProposalNotPending))
+    );
+    assert_eq!(
+        f.client.try_execute_clawback(&f.admin, &id),
+        Err(Ok(VaultError::ProposalNotPending))
+    );
 }
 
 #[test]
