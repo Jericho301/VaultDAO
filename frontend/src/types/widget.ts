@@ -29,6 +29,7 @@ export interface WidgetPermissions {
   proposals?: boolean;
   vaultConfig?: boolean;
   events?: boolean;
+  navigation?: boolean;
 }
 
 export interface WidgetConfig {

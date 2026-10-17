@@ -1,6 +1,6 @@
 import { beforeEach, describe, it, expect, vi } from 'vitest';
 import type { WidgetPermissions } from '../types/widget';
-import { getDataActionPermission, hasPermission, permissionDenied, resolvePermissionRequest } from './widgetPermissions';
+import { getDataActionPermission, hasPermission, permissionDenied, resolveNavigationPath, resolvePermissionRequest } from './widgetPermissions';
 
 describe('getDataActionPermission', () => {
   it('maps each data action to its required permission', () => {
@@ -72,5 +72,34 @@ describe('resolvePermissionRequest', () => {
     const denied = { ...widget, id: 'other-widget' };
     resolvePermissionRequest(denied, 'proposals', () => false);
     expect(resolvePermissionRequest(denied, 'proposals', never)).toBe(false);
+  });
+});
+
+describe('resolveNavigationPath', () => {
+  it('returns allowlisted routes unchanged', () => {
+    expect(resolveNavigationPath('/dashboard/proposals')).toBe('/dashboard/proposals');
+  });
+
+  it('rejects routes that are well formed but not allowlisted', () => {
+    expect(resolveNavigationPath('/dashboard/settings')).toBeNull();
+    expect(resolveNavigationPath('/dashboard/proposals/extra')).toBeNull();
+  });
+
+  it('rejects absolute and protocol-relative URLs', () => {
+    expect(resolveNavigationPath('https://evil.example/dashboard/proposals')).toBeNull();
+    expect(resolveNavigationPath('//evil.example/dashboard/proposals')).toBeNull();
+    expect(resolveNavigationPath('javascript:alert(1)')).toBeNull();
+  });
+
+  it('rejects query strings, fragments, traversal and uppercase paths', () => {
+    expect(resolveNavigationPath('/dashboard/proposals?x=1')).toBeNull();
+    expect(resolveNavigationPath('/dashboard/proposals#top')).toBeNull();
+    expect(resolveNavigationPath('/dashboard/../settings')).toBeNull();
+    expect(resolveNavigationPath('/Dashboard/Proposals')).toBeNull();
+  });
+
+  it('rejects non-string input', () => {
+    expect(resolveNavigationPath(undefined)).toBeNull();
+    expect(resolveNavigationPath(['/dashboard/proposals'])).toBeNull();
   });
 });

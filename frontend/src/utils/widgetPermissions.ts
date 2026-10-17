@@ -10,7 +10,28 @@ export const WIDGET_PERMISSION_KEYS: readonly WidgetPermissionKey[] = [
   'proposals',
   'vaultConfig',
   'events',
+  'navigation',
 ];
+
+/** Routes a widget may navigate the host app to. Exact matches only. */
+export const WIDGET_NAVIGATION_ALLOWLIST: readonly string[] = [
+  '/dashboard/proposals',
+  '/dashboard/activity',
+  '/dashboard/analytics',
+  '/dashboard/governance',
+];
+
+const NAVIGATION_PATH_PATTERN = /^\/[a-z0-9-]+(\/[a-z0-9-]+)*$/;
+
+/**
+ * Returns the path if it is a well-formed, allowlisted route, otherwise null.
+ * Absolute URLs, protocol-relative paths, query strings and traversal segments
+ * fail the pattern before the allowlist is consulted.
+ */
+export function resolveNavigationPath(path: unknown, allowlist: readonly string[] = WIDGET_NAVIGATION_ALLOWLIST): string | null {
+  if (typeof path !== 'string' || !NAVIGATION_PATH_PATTERN.test(path)) return null;
+  return allowlist.includes(path) ? path : null;
+}
 
 const CONSENT_STORAGE_KEY = 'vaultdao-widget-consents';
 

@@ -58,6 +58,7 @@ export function parseRegistryEntry(raw: unknown): MarketplaceWidget | null {
         proposals: permissions.proposals === true,
         vaultConfig: permissions.vaultConfig === true,
         events: permissions.events === true,
+        navigation: permissions.navigation === true,
       },
       entryPoint: manifest.entryPoint,
       configSchema: isRecord(manifest.configSchema) ? manifest.configSchema : undefined,

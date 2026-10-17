@@ -6,7 +6,7 @@ import { useProposals } from '../hooks/useProposals';
 import { useVaultContract } from '../hooks/useVaultContract';
 import type { InstalledWidget, WidgetMessage, WidgetEventType } from '../types/widget';
 import { buildWidgetSandboxHtml, isValidWidgetId } from '../utils/widgetSandbox';
-import { getDataActionPermission, hasPermission, permissionDenied, resolvePermissionRequest } from '../utils/widgetPermissions';
+import { getDataActionPermission, hasPermission, permissionDenied, resolveNavigationPath, resolvePermissionRequest } from '../utils/widgetPermissions';
 
 interface WidgetSandboxProps {
   widget: InstalledWidget;
@@ -110,10 +110,20 @@ const WidgetSandbox: React.FC<WidgetSandboxProps> = ({ widget, onLoad, onError, 
         }
         break;
 
-      case 'navigate':
-        navigate(payload.path as string);
+      case 'navigate': {
+        if (!hasPermission(widget.permissions, 'navigation')) {
+          respond(permissionDenied('navigation'));
+          break;
+        }
+        const path = resolveNavigationPath(payload.path);
+        if (!path) {
+          respond({ error: 'invalid_path' });
+          break;
+        }
+        navigate(path);
         respond({ success: true });
         break;
+      }
 
       case 'subscribe':
         if (!hasPermission(widget.permissions, 'events')) {
