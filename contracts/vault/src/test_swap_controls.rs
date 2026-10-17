@@ -256,3 +256,41 @@ fn test_propose_swap_rejected_while_paused() {
     assert_eq!(res, Err(Ok(VaultError::VaultPaused)));
 }
 
+// ============================================================================
+// #1927: execution honours conditions, pause and expiry
+// ============================================================================
+
+#[test]
+fn test_swap_with_unmet_price_condition_does_not_execute() {
+    let env = Env::default();
+    let ctx = setup(&env);
+    let token_in = Address::generate(&env);
+    let token_out = Address::generate(&env);
+    ctx.client.add_supported_token(&ctx.admin, &token_in, &1_000_000, &1_000_000);
+    ctx.client.add_supported_token(&ctx.admin, &token_out, &1_000_000, &1_000_000);
+
+    let mut conditions = Vec::new(&env);
+    conditions.push_back(Condition::PriceAbove(token_in.clone(), i128::MAX));
+    let proposal_id = ctx.client.propose_swap(
+        &ctx.treasurer,
+        &swap_op(&ctx, &token_in, &token_out, 100),
+        &Priority::Normal,
+        &conditions,
+        &ConditionLogic::And,
+        &0i128,
+    );
+    ctx.client.approve_proposal(&ctx.admin, &proposal_id);
+    ctx.client.approve_proposal(&ctx.treasurer, &proposal_id);
+    assert_eq!(
+        ctx.client.get_proposal(&proposal_id).status,
+        ProposalStatus::Approved
+    );
+
+    let res = ctx.client.try_execute_swap_proposal(&ctx.admin, &proposal_id);
+    assert!(res.is_err());
+    assert_ne!(
+        ctx.client.get_proposal(&proposal_id).status,
+        ProposalStatus::Executed
+    );
+}
+

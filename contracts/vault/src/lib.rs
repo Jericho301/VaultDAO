@@ -12513,6 +12513,11 @@ impl VaultDAO {
     ) -> Result<(), VaultError> {
         executor.require_auth();
 
+        // Reject if vault is paused, as execute_proposal does (#1927)
+        if storage::get_pause_state(&env).is_paused {
+            return Err(VaultError::VaultPaused);
+        }
+
         // Get proposal
         let mut proposal = storage::get_proposal(&env, proposal_id)?;
 
@@ -12527,14 +12532,48 @@ impl VaultDAO {
             return Err(VaultError::ProposalAlreadyExecuted);
         }
 
-        // Check expiration
+        // Reentrancy guard (#1414)
+        if storage::is_proposal_in_progress(&env, proposal_id) {
+            return Err(VaultError::ProposalNotApproved);
+        }
+
+        // Expired and window-expired proposals are persisted as Expired and the
+        // reserved spend is refunded. Soroban rolls back state on Err, so this
+        // returns Ok to keep the status change.
         let current_ledger = env.ledger().sequence() as u64;
-        if current_ledger > proposal.expires_at {
+        let config = storage::get_config(&env)?;
+        let window_expired = config.exec_window_ledgers > 0
+            && proposal.approved_at > 0
+            && current_ledger > proposal.approved_at + config.exec_window_ledgers;
+        if current_ledger > proposal.expires_at || window_expired {
+            storage::refund_spending_limits(
+                &env,
+                proposal.amount,
+                proposal.spend_day,
+                proposal.spend_week,
+            );
+            storage::refund_token_spending_limits(
+                &env,
+                &proposal.token,
+                proposal.amount,
+                proposal.spend_day,
+                proposal.spend_week,
+            );
             proposal.status = ProposalStatus::Expired;
+            storage::pending_expiry_index_remove(&env, proposal_id);
             storage::set_proposal(&env, &proposal);
             storage::metrics_on_expiry(&env);
-            events::emit_proposal_expired(&env, proposal_id, proposal.expires_at);
-            return Err(VaultError::ProposalExpired);
+            if window_expired {
+                events::emit_execution_window_expired(
+                    &env,
+                    proposal_id,
+                    proposal.approved_at,
+                    config.exec_window_ledgers,
+                );
+            } else {
+                events::emit_proposal_expired(&env, proposal_id, proposal.expires_at);
+            }
+            return Ok(());
         }
 
         // Check Timelock
@@ -12542,10 +12581,42 @@ impl VaultDAO {
             return Err(VaultError::TimelockNotExpired);
         }
 
+        // Evaluate the conditions attached to the swap (#1927)
+        Self::evaluate_conditions(&env, &proposal)?;
+
+        // Dependencies must be executed in a prior ledger, as in execute_proposal
+        for dependency_id in proposal.depends_on.iter() {
+            if let Ok(dep_proposal) = storage::get_proposal(&env, dependency_id) {
+                if dep_proposal.status != ProposalStatus::Executed {
+                    return Err(VaultError::ProposalNotApproved);
+                }
+                if dep_proposal.execution_ledger == 0
+                    || dep_proposal.execution_ledger >= current_ledger
+                {
+                    return Err(VaultError::DependencyNotExecuted);
+                }
+            } else {
+                return Err(VaultError::ProposalNotFound);
+            }
+        }
+
+        // Circuit breaker: same hourly outflow accounting as execute_proposal
+        let threshold = storage::get_circuit_breaker_threshold(&env);
+        if threshold > 0 {
+            let window = storage::get_hour_window(&env);
+            let outflow = storage::get_circuit_breaker_outflow(&env, window);
+            if outflow + proposal.amount > threshold {
+                return Err(VaultError::VaultPaused);
+            }
+            storage::add_circuit_breaker_outflow(&env, window, proposal.amount);
+        }
+
         // Get DEX config and swap details
         let dex_config = storage::get_dex_config(&env).ok_or(VaultError::DexError)?;
         let swap_proposal =
             storage::get_swap_proposal(&env, proposal_id).ok_or(VaultError::DexError)?;
+
+        storage::set_proposal_in_progress(&env, proposal_id);
 
         // Perform comprehensive swap validation and execution
         let swap_result =
@@ -12556,9 +12627,36 @@ impl VaultDAO {
 
         // Update proposal status
         proposal.status = ProposalStatus::Executed;
+        proposal.execution_ledger = current_ledger;
         storage::pending_expiry_index_remove(&env, proposal_id);
         storage::set_proposal(&env, &proposal);
         storage::extend_instance_ttl(&env);
+
+        // Success side effects, matching execute_proposal (#1927)
+        events::emit_proposal_executed(
+            &env,
+            proposal_id,
+            &executor,
+            &proposal.recipient,
+            &proposal.token,
+            proposal.amount.saturating_sub(proposal.gas_used),
+            proposal.gas_used,
+            current_ledger,
+        );
+        Self::update_reputation_on_execution(&env, &proposal);
+        let execution_time = current_ledger.saturating_sub(proposal.created_at);
+        storage::metrics_on_execution(&env, proposal.gas_used, execution_time);
+        let metrics = storage::get_metrics(&env);
+        events::emit_metrics_updated(
+            &env,
+            metrics.executed_count,
+            metrics.rejected_count,
+            metrics.expired_count,
+            metrics.success_rate_bps(),
+        );
+        storage::create_audit_entry(&env, AuditAction::ExecuteProposal, &executor, proposal_id);
+
+        storage::clear_proposal_in_progress(&env, proposal_id);
         Ok(())
     }
 
