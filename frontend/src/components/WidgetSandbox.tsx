@@ -6,6 +6,7 @@ import { useProposals } from '../hooks/useProposals';
 import { useVaultContract } from '../hooks/useVaultContract';
 import type { InstalledWidget, WidgetMessage, WidgetEventType } from '../types/widget';
 import { buildWidgetSandboxHtml, isValidWidgetId } from '../utils/widgetSandbox';
+import { getDataActionPermission, hasPermission, permissionDenied } from '../utils/widgetPermissions';
 
 interface WidgetSandboxProps {
   widget: InstalledWidget;
@@ -65,14 +66,21 @@ const WidgetSandbox: React.FC<WidgetSandboxProps> = ({ widget, onLoad, onError, 
           }
           break;
 
-        case 'data':
+        case 'data': {
+          const required = getDataActionPermission(payload.action);
+          if (!required) break;
+          if (!hasPermission(widget.permissions, required)) {
+            respond(permissionDenied(required));
+            break;
+          }
           if (payload.action === 'getProposals') {
             respond(proposals);
-          } else if (payload.action === 'getVaultConfig') {
+          } else {
             const config = await getVaultConfig();
             respond(config);
           }
           break;
+        }
 
         case 'action':
           handleWidgetAction(payload, respond);
@@ -94,11 +102,11 @@ const WidgetSandbox: React.FC<WidgetSandboxProps> = ({ widget, onLoad, onError, 
   const handleWidgetAction = (payload: Record<string, unknown>, respond: (data: unknown) => void) => {
     switch (payload.action) {
       case 'showToast':
-        if (widget.permissions.notifications) {
+        if (hasPermission(widget.permissions, 'notifications')) {
           showToast(payload.message as string, (payload.type as any) || 'info');
           respond({ success: true });
         } else {
-          respond({ error: 'Notification permission denied' });
+          respond(permissionDenied('notifications'));
         }
         break;
 
@@ -108,6 +116,10 @@ const WidgetSandbox: React.FC<WidgetSandboxProps> = ({ widget, onLoad, onError, 
         break;
 
       case 'subscribe':
+        if (!hasPermission(widget.permissions, 'events')) {
+          respond(permissionDenied('events'));
+          break;
+        }
         setActiveSubscriptions(prev => new Set(prev).add(payload.eventType as WidgetEventType));
         respond({ success: true });
         break;
