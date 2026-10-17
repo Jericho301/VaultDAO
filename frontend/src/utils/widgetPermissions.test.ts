@@ -1,6 +1,6 @@
-import { describe, it, expect } from 'vitest';
+import { beforeEach, describe, it, expect, vi } from 'vitest';
 import type { WidgetPermissions } from '../types/widget';
-import { getDataActionPermission, hasPermission, permissionDenied } from './widgetPermissions';
+import { getDataActionPermission, hasPermission, permissionDenied, resolvePermissionRequest } from './widgetPermissions';
 
 describe('getDataActionPermission', () => {
   it('maps each data action to its required permission', () => {
@@ -33,5 +33,44 @@ describe('hasPermission', () => {
 describe('permissionDenied', () => {
   it('returns a typed permission_denied payload naming the permission', () => {
     expect(permissionDenied('proposals')).toEqual({ error: 'permission_denied', permission: 'proposals' });
+  });
+});
+
+describe('resolvePermissionRequest', () => {
+  const widget = { id: 'gov-widget', permissions: { proposals: true } as WidgetPermissions };
+  const never = () => {
+    throw new Error('should not prompt');
+  };
+
+  beforeEach(() => {
+    localStorage.clear();
+  });
+
+  it('grants a declared permission when the user allows it', () => {
+    const ask = vi.fn(() => true);
+    expect(resolvePermissionRequest(widget, 'proposals', ask)).toBe(true);
+    expect(ask).toHaveBeenCalledWith('proposals');
+  });
+
+  it('denies a declared permission when the user refuses it', () => {
+    expect(resolvePermissionRequest(widget, 'proposals', () => false)).toBe(false);
+  });
+
+  it('denies an undeclared permission without prompting', () => {
+    expect(resolvePermissionRequest(widget, 'wallet', never)).toBe(false);
+  });
+
+  it('denies unknown permission names without prompting', () => {
+    expect(resolvePermissionRequest(widget, 'constructor', never)).toBe(false);
+    expect(resolvePermissionRequest(widget, undefined, never)).toBe(false);
+  });
+
+  it('remembers the decision per widget and does not prompt again', () => {
+    resolvePermissionRequest(widget, 'proposals', () => true);
+    expect(resolvePermissionRequest(widget, 'proposals', never)).toBe(true);
+
+    const denied = { ...widget, id: 'other-widget' };
+    resolvePermissionRequest(denied, 'proposals', () => false);
+    expect(resolvePermissionRequest(denied, 'proposals', never)).toBe(false);
   });
 });

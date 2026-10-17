@@ -6,7 +6,7 @@ import { useProposals } from '../hooks/useProposals';
 import { useVaultContract } from '../hooks/useVaultContract';
 import type { InstalledWidget, WidgetMessage, WidgetEventType } from '../types/widget';
 import { buildWidgetSandboxHtml, isValidWidgetId } from '../utils/widgetSandbox';
-import { getDataActionPermission, hasPermission, permissionDenied } from '../utils/widgetPermissions';
+import { getDataActionPermission, hasPermission, permissionDenied, resolvePermissionRequest } from '../utils/widgetPermissions';
 
 interface WidgetSandboxProps {
   widget: InstalledWidget;
@@ -133,10 +133,13 @@ const WidgetSandbox: React.FC<WidgetSandboxProps> = ({ widget, onLoad, onError, 
         respond({ success: true });
         break;
 
-      case 'request-permission':
-        // Mock permission granting
-        respond(true);
+      case 'request-permission': {
+        const granted = resolvePermissionRequest(widget, payload.permission, (permission) =>
+          window.confirm(`"${widget.metadata.name}" is requesting the "${permission}" permission. Allow it?`)
+        );
+        respond(granted);
         break;
+      }
     }
   };
 
