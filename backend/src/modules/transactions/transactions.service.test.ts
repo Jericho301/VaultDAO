@@ -193,3 +193,44 @@ test("TransactionsService rebuilding the index keeps proposal results stable", a
   assert.strictEqual(internal.getByProposal(contractId, "proposal-shared")?.length, 3);
   assert.strictEqual(internal.getByHash(contractId, "tx-a") !== undefined, true);
 });
+
+test("TransactionsService amount filters stay exact above Number.MAX_SAFE_INTEGER", async () => {
+  const big = "9007199254740993"; // MAX_SAFE_INTEGER + 2, not representable as a double
+  const records = [
+    makeExecutedRecord(1, { txHash: "tx-small" }),
+    makeExecutedRecord(2, { txHash: "tx-big" }),
+    makeExecutedRecord(3, { txHash: "tx-big-plus" }),
+  ];
+  records[0].data = { ...(records[0].data as object), amount: "9007199254740992" };
+  records[1].data = { ...(records[1].data as object), amount: big };
+  records[2].data = { ...(records[2].data as object), amount: "9007199254740994" };
+
+  const service = new TransactionsService(createPersistence(records));
+
+  const result = await service.getTransactions({
+    contractId: "contract-1",
+    token: "TOKEN-1",
+    minAmount: big,
+    maxAmount: "9007199254740994",
+    limit: 10,
+  });
+
+  const hashes = result.data.map((tx) => tx.transactionHash).sort();
+  assert.deepStrictEqual(hashes, ["tx-big", "tx-big-plus"]);
+});
+
+test("TransactionsService non-numeric amounts do not match a range filter", async () => {
+  const records = [makeExecutedRecord(1, { txHash: "tx-bad" })];
+  records[0].data = { ...(records[0].data as object), amount: "not-a-number" };
+
+  const service = new TransactionsService(createPersistence(records));
+  const result = await service.getTransactions({
+    contractId: "contract-1",
+    token: "TOKEN-1",
+    minAmount: "0",
+    maxAmount: "0",
+    limit: 10,
+  });
+
+  assert.strictEqual(result.data.length, 0);
+});

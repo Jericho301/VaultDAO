@@ -17,15 +17,26 @@ import { resolveIndexCursorWindow, buildCursorWindow } from "../../shared/pagina
 
 interface IndexedEntry {
   tx: Transaction;
-  amount: number;
+  /** Null when the stored amount is not a decimal string; such rows never match amount filters. */
+  amount: bigint | null;
   timestampMs: number;
 }
+
+/**
+ * Parses an i128 amount string (smallest token unit) without precision loss.
+ * Returns null for non-decimal input instead of a silently rounded value.
+ */
+export function parseAmount(value: string): bigint | null {
+  return /^\d+$/.test(value) ? BigInt(value) : null;
+}
+
+type AmountIndexedEntry = IndexedEntry & { amount: bigint };
 
 interface ContractIndex {
   all: IndexedEntry[];
   byHash: Map<string, IndexedEntry>;
   byProposal: Map<string, IndexedEntry[]>;
-  sortedByAmount: IndexedEntry[];
+  sortedByAmount: AmountIndexedEntry[];
 }
 
 /**
@@ -52,7 +63,9 @@ class TransactionIndex {
       arr.push(entry);
       byProposal.set(entry.tx.proposalId, arr);
     }
-    const sortedByAmount = [...entries].sort((a, b) => a.amount - b.amount);
+    const sortedByAmount = entries
+      .filter((e): e is AmountIndexedEntry => e.amount !== null)
+      .sort((a, b) => (a.amount < b.amount ? -1 : a.amount > b.amount ? 1 : 0));
     this.contracts.set(contractId, {
       all: entries,
       byHash,
@@ -73,7 +86,7 @@ class TransactionIndex {
     return this.contracts.get(contractId)?.byProposal.get(proposalId);
   }
 
-  rangeByAmount(contractId: string, min: number, max: number): IndexedEntry[] {
+  rangeByAmount(contractId: string, min: bigint, max: bigint): IndexedEntry[] {
     const sorted = this.contracts.get(contractId)?.sortedByAmount;
     if (!sorted) return [];
     let lo = 0;
@@ -149,7 +162,7 @@ export class TransactionsService {
 
         return {
           tx,
-          amount: parseFloat(tx.amount) || 0,
+          amount: parseAmount(tx.amount),
           timestampMs: new Date(tx.timestamp).getTime() || 0,
         };
       });
@@ -166,23 +179,22 @@ export class TransactionsService {
 
     const hasAmountRange =
       params.minAmount !== undefined && params.maxAmount !== undefined;
+    const minAmount = params.minAmount !== undefined ? BigInt(params.minAmount) : undefined;
+    const maxAmount = params.maxAmount !== undefined ? BigInt(params.maxAmount) : undefined;
     let entries: IndexedEntry[];
 
     if (hasAmountRange) {
-      const rangeResults = this.index.rangeByAmount(
-        params.contractId,
-        params.minAmount!,
-        params.maxAmount!,
-      );
-      entries = rangeResults;
+      entries = this.index.rangeByAmount(params.contractId, minAmount!, maxAmount!);
     } else {
       entries = allEntries;
     }
 
     const executed = entries
       .filter((e) => {
-        if (params.minAmount !== undefined && !hasAmountRange && e.amount < params.minAmount) return false;
-        if (params.maxAmount !== undefined && !hasAmountRange && e.amount > params.maxAmount) return false;
+        if (minAmount === undefined && maxAmount === undefined) return true;
+        if (e.amount === null) return false;
+        if (minAmount !== undefined && !hasAmountRange && e.amount < minAmount) return false;
+        if (maxAmount !== undefined && !hasAmountRange && e.amount > maxAmount) return false;
         return true;
       })
       .filter((e) => (params.token ? e.tx.token === params.token : true))
