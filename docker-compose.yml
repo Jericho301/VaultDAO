@@ -78,6 +78,8 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
+      # Vite dev server with hot reload; production Nginx image is in docker-compose.prod.yml
+      target: dev
     container_name: vaultdao-frontend
     ports:
       - "5173:5173"                                                   # Maps local host 5173 to Vite dev server/Nginx
