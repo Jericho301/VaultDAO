@@ -170,6 +170,21 @@ For each event:
   2. `effective_voter: Address`
   3. `signer: Address`
 
+#### `delegation_set`
+
+- **Contract topic**: `delegation_set`, with the `delegator` address as the second topic
+- **Emitted by**: `delegate_voting_power` and its alias `delegate_vote`, when a delegation is set or replaced
+- **Published data**:
+  1. `delegate: Address`
+  2. `expiry_ledger: u64` (0 means the delegation does not expire)
+
+#### `delegation_revoked`
+
+- **Contract topic**: `delegation_revoked`, with the `delegator` address as the second topic
+- **Emitted by**: `revoke_delegation`
+- **Published data**:
+  1. `delegate: Address` (the signer whose delegation was removed)
+
 #### `proposal_scheduled`
 
 - **Contract topic**: `proposal_scheduled`

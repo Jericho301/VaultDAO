@@ -190,6 +190,33 @@ pub fn emit_delegated_vote_skipped(
     );
 }
 
+/// Emit when a voting power delegation is set or replaced (#1939).
+///
+/// Topics: `("delegation_set", delegator)`
+/// Data:   `(delegate, expiry_ledger)`
+pub fn emit_delegation_set(
+    env: &Env,
+    delegator: &Address,
+    delegate: &Address,
+    expiry_ledger: u64,
+) {
+    env.events().publish(
+        (Symbol::new(env, "delegation_set"), delegator.clone()),
+        (delegate.clone(), expiry_ledger),
+    );
+}
+
+/// Emit when a voting power delegation is revoked (#1939).
+///
+/// Topics: `("delegation_revoked", delegator)`
+/// Data:   `delegate` (the signer whose delegation was removed)
+pub fn emit_delegation_revoked(env: &Env, delegator: &Address, delegate: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "delegation_revoked"), delegator.clone()),
+        delegate.clone(),
+    );
+}
+
 pub fn emit_proposal_scheduled(
     env: &Env,
     proposal_id: u64,

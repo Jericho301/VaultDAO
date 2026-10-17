@@ -3276,6 +3276,8 @@ impl VaultDAO {
             }
         }
 
+        events::emit_delegation_set(&env, &delegator, &delegate, delegation.expiry_ledger);
+
         let history = DelegationHistory {
             id: storage::increment_delegation_id(&env),
             delegator: delegator.clone(),
@@ -3359,6 +3361,7 @@ impl VaultDAO {
 
         storage::remove_delegation(&env, &delegator);
         storage::remove_delegator_index(&env, &old_delegation.delegate, &delegator);
+        events::emit_delegation_revoked(&env, &delegator, &old_delegation.delegate);
 
         let history = DelegationHistory {
             id: storage::increment_delegation_id(&env),
