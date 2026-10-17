@@ -164,3 +164,95 @@ fn test_subscription_first_payment_goes_straight_to_provider() {
     assert_eq!(token_client.balance(&ctx.contract_id), 0);
 }
 
+// ============================================================================
+// #1926: swaps are subject to the same controls as transfers
+// ============================================================================
+
+#[test]
+fn test_propose_swap_rejects_unsupported_token() {
+    let env = Env::default();
+    let ctx = setup(&env);
+    let token_in = Address::generate(&env);
+    let token_out = Address::generate(&env);
+
+    let res = ctx.client.try_propose_swap(
+        &ctx.treasurer,
+        &swap_op(&ctx, &token_in, &token_out, 100),
+        &Priority::Normal,
+        &Vec::new(&env),
+        &ConditionLogic::And,
+        &0i128,
+    );
+    assert_eq!(res, Err(Ok(VaultError::TokenNotSupported)));
+}
+
+#[test]
+fn test_propose_swap_enforces_per_proposal_limit() {
+    let env = Env::default();
+    let ctx = setup(&env);
+    let token_in = Address::generate(&env);
+    let token_out = Address::generate(&env);
+    ctx.client.add_supported_token(&ctx.admin, &token_in, &1_000_000, &1_000_000);
+    ctx.client.add_supported_token(&ctx.admin, &token_out, &1_000_000, &1_000_000);
+
+    // spending_limit is 10_000, so a 20_000 swap must be refused
+    let res = ctx.client.try_propose_swap(
+        &ctx.treasurer,
+        &swap_op(&ctx, &token_in, &token_out, 20_000),
+        &Priority::Normal,
+        &Vec::new(&env),
+        &ConditionLogic::And,
+        &0i128,
+    );
+    assert_eq!(res, Err(Ok(VaultError::ExceedsProposalLimit)));
+}
+
+#[test]
+fn test_propose_swap_applies_timelock_to_large_swap() {
+    let env = Env::default();
+    let ctx = setup(&env);
+    let token_in = Address::generate(&env);
+    let token_out = Address::generate(&env);
+    ctx.client.add_supported_token(&ctx.admin, &token_in, &1_000_000, &1_000_000);
+    ctx.client.add_supported_token(&ctx.admin, &token_out, &1_000_000, &1_000_000);
+
+    // 6_000 is under spending_limit (10_000) but over timelock_threshold (5_000)
+    let proposal_id = ctx.client.propose_swap(
+        &ctx.treasurer,
+        &swap_op(&ctx, &token_in, &token_out, 6_000),
+        &Priority::Normal,
+        &Vec::new(&env),
+        &ConditionLogic::And,
+        &0i128,
+    );
+
+    let proposal = ctx.client.get_proposal(&proposal_id);
+    assert_eq!(proposal.amount, 6_000);
+    assert_eq!(proposal.token, token_in);
+    assert_eq!(
+        proposal.unlock_ledger,
+        env.ledger().sequence() as u64 + 100
+    );
+}
+
+#[test]
+fn test_propose_swap_rejected_while_paused() {
+    let env = Env::default();
+    let ctx = setup(&env);
+    let token_in = Address::generate(&env);
+    let token_out = Address::generate(&env);
+    ctx.client.add_supported_token(&ctx.admin, &token_in, &1_000_000, &1_000_000);
+    ctx.client.add_supported_token(&ctx.admin, &token_out, &1_000_000, &1_000_000);
+    ctx.client.pause_vault(&ctx.admin, &Symbol::new(&env, "manual"));
+
+    let res = ctx.client.try_propose_swap(
+        &ctx.treasurer,
+        &swap_op(&ctx, &token_in, &token_out, 100),
+        &Priority::Normal,
+        &Vec::new(&env),
+        &ConditionLogic::And,
+        &0i128,
+    );
+    assert_eq!(res, Err(Ok(VaultError::VaultPaused)));
+}
+

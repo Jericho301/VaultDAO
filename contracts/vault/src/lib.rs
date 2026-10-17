@@ -12275,6 +12275,68 @@ impl VaultDAO {
         storage::get_dex_config(&env)
     }
 
+    /// Apply the spending controls that `propose_transfer_internal` enforces to an
+    /// outflow of `amount` of `token`, then reserve the amount against the daily,
+    /// weekly and per-token counters. Shared by swap proposals (#1926).
+    fn reserve_outflow_limits(
+        env: &Env,
+        config: &Config,
+        proposer: &Address,
+        token: &Address,
+        amount: i128,
+    ) -> Result<(), VaultError> {
+        if !storage::check_and_update_velocity(env, proposer, token, &config.velocity_limit) {
+            return Err(VaultError::VelocityLimitExceeded);
+        }
+
+        let mut rep = storage::get_reputation(env, proposer);
+        storage::apply_reputation_decay(env, &mut rep);
+        storage::set_reputation(env, proposer, &rep);
+        let per_proposal_limit = if rep.score >= 900 {
+            config.spending_limit * 3
+        } else if rep.score >= 800 {
+            config.spending_limit * 2
+        } else {
+            config.spending_limit
+        };
+        if amount > per_proposal_limit {
+            return Err(VaultError::ExceedsProposalLimit);
+        }
+
+        let daily_limit = if rep.score >= 750 {
+            (config.daily_limit * 3) / 2
+        } else {
+            config.daily_limit
+        };
+        let weekly_limit = if rep.score >= 750 {
+            (config.weekly_limit * 3) / 2
+        } else {
+            config.weekly_limit
+        };
+        let today = storage::get_day_number(env);
+        let week = storage::get_week_number(env);
+        if storage::get_daily_spent(env, today) + amount > daily_limit {
+            return Err(VaultError::ExceedsDailyLimit);
+        }
+        if storage::get_weekly_spent(env, week) + amount > weekly_limit {
+            return Err(VaultError::ExceedsWeeklyLimit);
+        }
+        if let Some(token_cfg) = storage::get_token_spending_config(env, token) {
+            if storage::get_token_daily_spent(env, token, today) + amount > token_cfg.daily_limit {
+                return Err(VaultError::ExceedsTokenDailyLimit);
+            }
+            if storage::get_token_weekly_spent(env, token, week) + amount > token_cfg.weekly_limit {
+                return Err(VaultError::ExceedsTokenWeeklyLimit);
+            }
+        }
+
+        storage::add_daily_spent(env, today, amount);
+        storage::add_weekly_spent(env, week, amount);
+        storage::add_token_daily_spent(env, token, today, amount);
+        storage::add_token_weekly_spent(env, token, week, amount);
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn propose_swap(
         env: Env,
@@ -12286,6 +12348,8 @@ impl VaultDAO {
         insurance_amount: i128,
     ) -> Result<u64, VaultError> {
         proposer.require_auth();
+        // Swaps move treasury funds, so they honour the same pause as transfers (#1926)
+        require_not_paused(&env)?;
         let config = storage::get_config(&env)?;
         let role = storage::get_role(&env, &proposer);
         if !Role::role_satisfies(Role::Treasurer, role) {
@@ -12305,14 +12369,66 @@ impl VaultDAO {
             return Err(VaultError::DexError);
         }
 
+        // Derive what the swap takes out of the vault, and which tokens it touches (#1926).
+        // Every touched token must be supported, and the outflow is subject to the same
+        // limits, velocity window and timelock as an ordinary transfer.
+        let (spend_token, spend_amount, touched_tokens) = match &swap_op {
+            SwapProposal::Swap(_, token_in, token_out, amount_in, _) => (
+                token_in.clone(),
+                *amount_in,
+                soroban_sdk::vec![&env, token_in.clone(), token_out.clone()],
+            ),
+            SwapProposal::AddLiquidity(_, token_a, token_b, amount_a, _, _) => (
+                token_a.clone(),
+                *amount_a,
+                soroban_sdk::vec![&env, token_a.clone(), token_b.clone()],
+            ),
+            SwapProposal::RemoveLiquidity(_, lp_token, amount, _, _) => (
+                lp_token.clone(),
+                *amount,
+                soroban_sdk::vec![&env, lp_token.clone()],
+            ),
+            SwapProposal::StakeLp(_, lp_token, amount) => (
+                lp_token.clone(),
+                *amount,
+                soroban_sdk::vec![&env, lp_token.clone()],
+            ),
+            SwapProposal::UnstakeLp(_, lp_token, _) => (
+                lp_token.clone(),
+                0,
+                soroban_sdk::vec![&env, lp_token.clone()],
+            ),
+            SwapProposal::ClaimRewards(_) => (
+                env.current_contract_address(),
+                0,
+                Vec::new(&env),
+            ),
+        };
+        for token in touched_tokens.iter() {
+            if !config.supported_tokens.contains(&token) {
+                return Err(VaultError::TokenNotSupported);
+            }
+        }
+        if spend_amount < 0 {
+            return Err(VaultError::InvalidAmount);
+        }
+        if spend_amount > 0 {
+            Self::reserve_outflow_limits(&env, &config, &proposer, &spend_token, spend_amount)?;
+        }
+
         let current_ledger = env.ledger().sequence() as u64;
+        let unlock_ledger = if spend_amount > 0 && spend_amount >= config.timelock_threshold {
+            current_ledger + config.timelock_delay
+        } else {
+            0
+        };
         let proposal_id = storage::increment_proposal_id(&env);
         let proposal = Proposal {
             id: proposal_id,
             proposer: proposer.clone(),
             recipient: env.current_contract_address(),
-            token: env.current_contract_address(),
-            amount: 0,
+            token: spend_token,
+            amount: spend_amount,
             memo: Symbol::new(&env, "swap"),
             metadata: Map::new(&env),
             tags: Vec::new(&env),
@@ -12326,7 +12442,7 @@ impl VaultDAO {
             condition_logic,
             created_at: current_ledger,
             expires_at: calculate_expiration_ledger(&config, &priority, current_ledger),
-            unlock_ledger: 0,
+            unlock_ledger,
             execution_time: None,
             execution_window_ledgers: 0,
             insurance_amount,
