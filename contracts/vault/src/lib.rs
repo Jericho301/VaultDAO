@@ -16792,6 +16792,11 @@ impl VaultDAO {
         if interval_ledgers == 0 {
             return Err(VaultError::IntervalTooShort);
         }
+        // Only supported tokens may be charged; an arbitrary token contract could
+        // run code during the transfers below (#1925).
+        if !storage::get_config(&env)?.supported_tokens.contains(&token) {
+            return Err(VaultError::TokenNotSupported);
+        }
 
         // First payment up-front: subscriber ? vault ? provider.
         token::transfer_to_vault(&env, &token, &subscriber, amount_per_period);

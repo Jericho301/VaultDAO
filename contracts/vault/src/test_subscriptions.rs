@@ -62,6 +62,8 @@ fn setup(env: &Env) -> (VaultDAOClient<'_>, Address, Address, Address) {
         },
     );
 
+    client.add_supported_token(&admin, &token, &1_000_000i128, &5_000_000i128);
+
     (client, admin, token_admin, token)
 }
 
@@ -873,4 +875,30 @@ fn test_reactivate_expired_subscription() {
     assert_eq!(reactivated.status, SubscriptionStatus::Active);
     assert!(reactivated.auto_renew);
     assert_eq!(reactivated.total_payments, 2);
+}
+
+#[test]
+fn test_create_subscription_unsupported_token_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, token_admin, _token) = setup(&env);
+    let subscriber = Address::generate(&env);
+    let provider = Address::generate(&env);
+    let unsupported = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
+    fund_subscriber(&env, &unsupported, &subscriber, 100_000);
+
+    let res = client.try_create_subscription(
+        &subscriber,
+        &provider,
+        &SubscriptionTier::Basic,
+        &unsupported,
+        &100i128,
+        &500u64,
+        &false,
+        &50u64,
+    );
+    assert_eq!(res, Err(Ok(VaultError::TokenNotSupported)));
 }
