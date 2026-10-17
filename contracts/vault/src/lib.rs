@@ -16880,7 +16880,6 @@ impl VaultDAO {
         let grace_deadline = sub.next_renewal_ledger + sub.grace_period_ledgers;
         if current_ledger > grace_deadline {
             sub.status = SubscriptionStatus::Expired;
-            sub.auto_renew = false;
             storage::set_subscription(&env, &sub);
             events::emit_subscription_expired(&env, subscription_id);
             return Err(VaultError::SubscriptionAlreadyExpired);
@@ -17043,7 +17042,6 @@ impl VaultDAO {
             if current_ledger > grace_deadline {
                 let mut expired_sub = sub;
                 expired_sub.status = SubscriptionStatus::Expired;
-                expired_sub.auto_renew = false;
                 storage::set_subscription(&env, &expired_sub);
                 events::emit_subscription_expired(&env, id);
                 expired_count += 1;
@@ -17087,8 +17085,9 @@ impl VaultDAO {
             sub.amount_per_period,
         );
 
+        // `auto_renew` is preserved from creation: the subscriber's choice of
+        // who may trigger charges must not change on reactivation (#1923).
         sub.status = SubscriptionStatus::Active;
-        sub.auto_renew = true;
         sub.total_payments += 1;
         sub.last_payment_ledger = current_ledger;
         sub.next_renewal_ledger = current_ledger + sub.interval_ledgers;
