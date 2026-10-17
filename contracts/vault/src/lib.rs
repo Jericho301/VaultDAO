@@ -453,6 +453,8 @@ mod test_escrow_timeout;
 #[cfg(test)]
 mod test_escrow_creation_validation;
 #[cfg(test)]
+mod test_funding_round_release_accounting;
+#[cfg(test)]
 mod test_escrow_voting;
 #[cfg(test)]
 mod test_escrows_by_recipient;
@@ -15992,8 +15994,9 @@ impl VaultDAO {
         // Release proportional tranche to recipient
         token::transfer(&env, &round.token, &round.recipient, amount);
         round.released_amount = round.released_amount.saturating_add(amount);
-
-        round.released_amount = round.released_amount.saturating_add(amount);
+        if round.released_amount > round.total_amount {
+            return Err(VaultError::InvalidAmount);
+        }
 
         // Auto-complete if all milestones are now verified
         if round.all_milestones_verified() {
