@@ -218,3 +218,67 @@ test("Snapshot Rollback: unknown ID on adapter without restoreSnapshot returns S
   assert.strictEqual(result.errorCode, "SNAPSHOT_NOT_FOUND");
   assert.strictEqual((await base.getSnapshot(contractId))?.lastProcessedLedger, before?.lastProcessedLedger);
 });
+
+test("Snapshot Rebuild: failing event mid-replay keeps the previous snapshot intact", async () => {
+  const adapter = new MemorySnapshotAdapter();
+  const service = new SnapshotService(adapter);
+  const contractId = "C_REBUILD_ATOMIC_1";
+
+  await service.processEvent(
+    createMockEvent("old1", contractId, EventType.ROLE_ASSIGNED, 10, {
+      address: "G_OLD",
+      role: Role.ADMIN,
+    }),
+  );
+  const before = await adapter.getSnapshot(contractId);
+
+  const events = [
+    createMockEvent("new1", contractId, EventType.ROLE_ASSIGNED, 20, {
+      address: "G_NEW",
+      role: Role.TREASURER,
+    }),
+    // Null data makes the handler throw, so processEvent reports success: false.
+    createMockEvent("bad", contractId, EventType.ROLE_ASSIGNED, 21, null),
+    createMockEvent("new2", contractId, EventType.ROLE_ASSIGNED, 22, {
+      address: "G_LATE",
+      role: Role.MEMBER,
+    }),
+  ];
+
+  const result = await service.rebuildSnapshot(events, { contractId, clearExisting: true });
+
+  assert.strictEqual(result.success, false);
+  const after = await adapter.getSnapshot(contractId);
+  assert.strictEqual(after?.lastProcessedLedger, before?.lastProcessedLedger);
+  assert.ok(after?.signers.has("G_OLD") || after?.roles.has("G_OLD"));
+  assert.strictEqual(after?.roles.has("G_NEW"), false);
+});
+
+test("Snapshot Rebuild: successful replay replaces the previous snapshot", async () => {
+  const adapter = new MemorySnapshotAdapter();
+  const service = new SnapshotService(adapter);
+  const contractId = "C_REBUILD_OK_1";
+
+  await service.processEvent(
+    createMockEvent("old2", contractId, EventType.ROLE_ASSIGNED, 10, {
+      address: "G_OLD",
+      role: Role.ADMIN,
+    }),
+  );
+
+  const result = await service.rebuildSnapshot(
+    [
+      createMockEvent("new3", contractId, EventType.ROLE_ASSIGNED, 20, {
+        address: "G_NEW",
+        role: Role.TREASURER,
+      }),
+    ],
+    { contractId, clearExisting: true },
+  );
+
+  assert.strictEqual(result.success, true);
+  const after = await adapter.getSnapshot(contractId);
+  assert.strictEqual(after?.lastProcessedLedger, 20);
+  assert.strictEqual(after?.roles.has("G_OLD"), false);
+  assert.strictEqual(after?.roles.has("G_NEW"), true);
+});
