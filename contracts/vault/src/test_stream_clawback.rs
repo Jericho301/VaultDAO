@@ -12,14 +12,14 @@
 
 use crate::errors::VaultError;
 use crate::types::{
-    RecoveryConfig, RetryConfig, Role, StakingConfig, StreamStatus, ThresholdStrategy,
-    VelocityConfig, VoteWeight,
+    ClawbackStatus, RecoveryConfig, RetryConfig, Role, StakingConfig, StreamStatus,
+    ThresholdStrategy, VelocityConfig, VoteWeight,
 };
 use crate::{InitConfig, VaultDAO, VaultDAOClient};
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
     token::{StellarAssetClient, TokenClient},
-    Address, Env, Vec,
+    Address, Env, Symbol, Vec,
 };
 
 const RATE: i128 = 1;
@@ -250,4 +250,78 @@ fn test_recall_nonexistent_stream_fails() {
     let f = setup(&env);
 
     assert!(f.client.try_cancel_stream(&f.admin, &999u64).is_err());
+}
+
+/// Requests a clawback from `admin` and approves it with the sender's vote.
+fn approve_clawback(f: &Fixture<'_>, env: &Env, amount: i128) -> u64 {
+    let id = f.client.request_stream_clawback(
+        &f.admin,
+        &f.stream_id,
+        &amount,
+        &Symbol::new(env, "recall"),
+    );
+    f.client.vote_clawback(&f.sender, &id, &true);
+    id
+}
+
+#[test]
+fn test_partial_clawback_recalls_only_requested_amount() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let f = setup(&env);
+
+    advance(&env, 300);
+    let id = approve_clawback(&f, &env, 200);
+    f.client.execute_clawback(&f.admin, &id);
+
+    // Recalled tokens go back to the sender; the stream is reduced by the same amount
+    assert_eq!(f.token.balance(&f.sender), 200);
+    assert_eq!(f.client.get_stream(&f.stream_id).total_amount, TOTAL - 200);
+
+    // The recipient keeps streaming and receives the reduced schedule in full
+    advance(&env, 700);
+    let claimed = f.client.claim_stream(&f.recipient, &f.stream_id);
+    assert_eq!(claimed, TOTAL - 200);
+    assert_eq!(f.token.balance(&f.recipient), TOTAL - 200);
+    assert_eq!(f.token.balance(&f.client.address), 0);
+    assert_eq!(
+        f.client.get_clawback_request(&id).status,
+        ClawbackStatus::Executed
+    );
+}
+
+#[test]
+fn test_full_clawback_is_capped_at_unvested_amount() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let f = setup(&env);
+
+    advance(&env, 300);
+    // Requested amount exceeds what is unvested, so only the unvested 700 is recalled
+    let id = approve_clawback(&f, &env, TOTAL);
+    f.client.execute_clawback(&f.admin, &id);
+
+    assert_eq!(f.token.balance(&f.sender), TOTAL - 300 * RATE);
+    assert_eq!(f.client.get_stream(&f.stream_id).total_amount, 300 * RATE);
+
+    advance(&env, 100);
+    let claimed = f.client.claim_stream(&f.recipient, &f.stream_id);
+    assert_eq!(claimed, 300 * RATE);
+    assert_eq!(f.token.balance(&f.client.address), 0);
+}
+
+#[test]
+fn test_clawback_with_nothing_unvested_is_rejected() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let f = setup(&env);
+
+    advance(&env, DURATION);
+    let id = approve_clawback(&f, &env, 100);
+
+    assert_eq!(
+        f.client.try_execute_clawback(&f.admin, &id),
+        Err(Ok(VaultError::InvalidAmount))
+    );
+    assert_eq!(f.token.balance(&f.sender), 0);
 }

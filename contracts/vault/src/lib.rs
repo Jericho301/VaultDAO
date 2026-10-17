@@ -8077,7 +8077,17 @@ impl VaultDAO {
         storage::get_stream_rate_window(&env, stream_id)
     }
 
-    /// Execute an approved clawback and recall unearned tokens (Issue #1724).
+    /// Execute an approved clawback and recall unvested tokens (Issue #1724, #1910).
+    ///
+    /// The recalled amount is `min(req.amount, total_amount - gross_earned)`, so
+    /// nothing the recipient has already accrued is taken. The recalled tokens
+    /// go back to the stream sender and their reserve is released. The stream
+    /// keeps running with a reduced `total_amount`, so the recipient still
+    /// receives everything accrued and the remainder of the schedule.
+    ///
+    /// # Errors
+    /// Returns [`VaultError::StreamNotActive`] if the stream is not Active or Paused.
+    /// Returns [`VaultError::InvalidAmount`] if there is no unvested amount to recall.
     pub fn execute_clawback(
         env: Env,
         caller: Address,
@@ -8093,12 +8103,42 @@ impl VaultDAO {
             return Err(VaultError::ProposalNotPending);
         }
         let mut stream = storage::get_streaming_payment(&env, req.stream_id)?;
-        stream.status = StreamStatus::Cancelled;
+        if stream.status != StreamStatus::Active && stream.status != StreamStatus::Paused {
+            return Err(VaultError::StreamNotActive);
+        }
+
+        let now = env.ledger().timestamp();
+        let mut accumulated_seconds = stream.accumulated_seconds;
+        if stream.status == StreamStatus::Active {
+            let effective_now = if now > stream.end_timestamp {
+                stream.end_timestamp
+            } else {
+                now
+            };
+            accumulated_seconds += effective_now.saturating_sub(stream.last_update_timestamp);
+        }
+
+        let gross_earned = (stream.rate * accumulated_seconds as i128).min(stream.total_amount);
+        let unvested = stream.total_amount - gross_earned;
+        let recall = req.amount.min(unvested);
+        if recall <= 0 {
+            return Err(VaultError::InvalidAmount);
+        }
+
+        if token::try_transfer(&env, &stream.token_addr, &stream.sender, recall).is_err() {
+            return Err(VaultError::InsufficientBalance);
+        }
+        storage::release_stream_reserve(&env, &stream.token_addr, recall);
+
+        stream.total_amount -= recall;
+        stream.accumulated_seconds = accumulated_seconds;
+        stream.last_update_timestamp = now;
         storage::set_streaming_payment(&env, &stream);
         storage::remove_stream_rate_window(&env, req.stream_id);
+
         req.status = ClawbackStatus::Executed;
         storage::set_clawback_request(&env, &req);
-        events::emit_stream_status_updated(&env, req.stream_id, StreamStatus::Cancelled as u32, &caller);
+        events::emit_stream_clawback_executed(&env, req.stream_id, recall, &caller);
         Ok(())
     }
     // ========================================================================
