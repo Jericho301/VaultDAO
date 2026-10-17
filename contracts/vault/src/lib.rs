@@ -502,6 +502,7 @@ mod test_subscription_auto_topup;
 #[cfg(test)]
 mod test_subscription_downgrade_grace;
 #[cfg(test)]
+mod test_swap_controls;
 mod test_swap_multi_token;
 #[cfg(test)]
 mod test_threshold_reduction;
@@ -16792,10 +16793,17 @@ impl VaultDAO {
         if interval_ledgers == 0 {
             return Err(VaultError::IntervalTooShort);
         }
+        // Only supported tokens may back a subscription. Without this check an
+        // arbitrary token contract runs inside the payment calls below, and
+        // per-token configuration is bypassed.
+        if !storage::get_config(&env)?.supported_tokens.contains(&token) {
+            return Err(VaultError::TokenNotSupported);
+        }
 
-        // First payment up-front: subscriber ? vault ? provider.
-        token::transfer_to_vault(&env, &token, &subscriber, amount_per_period);
-        token::transfer(&env, &token, &provider, amount_per_period);
+        // First payment goes straight from subscriber to provider. Staging it in the
+        // vault gained nothing and left the vault as an intermediate custodian.
+        token::transfer_from_holder(&env, &token, &subscriber, &provider, amount_per_period);
+
 
         let current_ledger = env.ledger().sequence() as u64;
         let id = storage::increment_subscription_id(&env);
