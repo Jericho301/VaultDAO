@@ -1,3 +1,4 @@
+import { toCsvFromArrays } from './csv';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import type { AuditEntry } from './auditVerification';
@@ -9,10 +10,6 @@ export interface ComplianceExportData {
   sections: string[];
   entries: AuditEntry[];
   reportType: string;
-}
-
-function quoteCSV(value: string): string {
-  return `"${value.replace(/"/g, '""')}"`;
 }
 
 export function exportCompliancePDF(data: ComplianceExportData): Blob {
@@ -179,9 +176,9 @@ export function exportComplianceCSV(data: ComplianceExportData): Blob {
       `${data.complianceScore}`,
       `${matched}`,
       status,
-    ].map(quoteCSV);
+    ];
   });
 
-  const csv = [headers.map(quoteCSV).join(','), ...rows.map((r) => r.join(','))].join('\n');
+  const csv = toCsvFromArrays([headers, ...rows], '\n');
   return new Blob([csv], { type: 'text/csv;charset=utf-8;' });
 }
