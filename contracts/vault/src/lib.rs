@@ -97,6 +97,9 @@ const MIN_ADMIN_ROTATION_DELAY: u64 = 1_440;
 /// allow near-instant contract replacement, defeating the timelock security guarantee.
 const MIN_UPGRADE_TIMELOCK: u64 = 17_280;
 
+/// Maximum number of milestones allowed on a single escrow
+const MAX_ESCROW_MILESTONES: u32 = 50;
+
 /// Minimum length for an attachment CID (CIDv0 = 46 chars, CIDv1 base32 = 59+ chars)
 const MIN_ATTACHMENT_LEN: u32 = 46;
 
@@ -447,6 +450,8 @@ mod test_escrow_milestone_partial_release;
 mod test_escrow_multisig_arbitration;
 #[cfg(test)]
 mod test_escrow_timeout;
+#[cfg(test)]
+mod test_escrow_creation_validation;
 #[cfg(test)]
 mod test_escrow_voting;
 #[cfg(test)]
@@ -13898,16 +13903,37 @@ impl VaultDAO {
             return Err(VaultError::InvalidAmount);
         }
 
-        if milestones.is_empty() {
+        if milestones.is_empty() || milestones.len() > MAX_ESCROW_MILESTONES {
             return Err(VaultError::InvalidAmount);
         }
 
-        // Validate milestone percentages sum to 100
+        if !storage::get_config(&env)?
+            .supported_tokens
+            .contains(&token_addr)
+        {
+            return Err(VaultError::TokenNotSupported);
+        }
+
+        if duration_ledgers == 0 {
+            return Err(VaultError::InvalidAmount);
+        }
+
+        if recipient == funder {
+            return Err(VaultError::InvalidAmount);
+        }
+
+        // Validate milestone percentages sum to 100 and IDs are unique and non-zero.
+        // Duplicate IDs would let `complete_milestone` complete several milestones at once.
         let mut total_pct: u32 = 0;
         for i in 0..milestones.len() {
             if let Some(m) = milestones.get(i) {
-                if m.percentage == 0 || m.percentage > 100 {
+                if m.percentage == 0 || m.percentage > 100 || m.id == 0 {
                     return Err(VaultError::InvalidAmount);
+                }
+                for j in 0..i {
+                    if milestones.get(j).map(|prev| prev.id) == Some(m.id) {
+                        return Err(VaultError::InvalidAmount);
+                    }
                 }
                 total_pct = total_pct.saturating_add(m.percentage);
             }
