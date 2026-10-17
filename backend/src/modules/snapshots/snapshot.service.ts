@@ -969,8 +969,24 @@ export class SnapshotService {
       }
 
       if (!restoredSnapshot) {
-        restoredSnapshot = this.createEmptySnapshot(contractId);
-        await this.adapter.saveSnapshot(restoredSnapshot);
+        // Never replace current state with an empty rebuild when the target is unknown.
+        const message = `snapshot ${String(targetSnapshotId)} not found for contract ${contractId}`;
+        logger.warn("[snapshot-service] rollback target not found", {
+          contractId,
+          rollbackSnapshotId: targetSnapshotId,
+        });
+        return {
+          success: false,
+          signersUpdated: 0,
+          rolesUpdated: 0,
+          eventsProcessed: 0,
+          lastProcessedLedger: 0,
+          rollbackSnapshotId: targetSnapshotId,
+          eventsReplayed: 0,
+          reason: rollbackReason,
+          error: message,
+          errorCode: "SNAPSHOT_NOT_FOUND",
+        };
       }
 
       const rollbackLedger = restoredSnapshot.lastProcessedLedger;

@@ -149,3 +149,72 @@ test("Snapshot Rollback: rollback and replay consistency", async () => {
   assert.strictEqual(replayedSnap?.lastProcessedLedger, initialSnap?.lastProcessedLedger);
   assert.strictEqual(replayedSnap?.totalRoleAssignments, initialSnap?.totalRoleAssignments);
 });
+
+test("Snapshot Rollback: unknown snapshot ID returns SNAPSHOT_NOT_FOUND and leaves state untouched", async () => {
+  const adapter = new MemorySnapshotAdapter();
+  const service = new SnapshotService(adapter);
+  const contractId = "C_ROLLBACK_UNKNOWN_1";
+
+  await service.processEvent(
+    createMockEvent("u1", contractId, EventType.ROLE_ASSIGNED, 10, {
+      address: "G_CAROL",
+      role: Role.ADMIN,
+    }),
+  );
+  const before = await adapter.getSnapshot(contractId);
+
+  const result = await service.rollbackSnapshot(contractId, "does-not-exist", "typo", []);
+
+  assert.strictEqual(result.success, false);
+  assert.strictEqual(result.errorCode, "SNAPSHOT_NOT_FOUND");
+  const after = await adapter.getSnapshot(contractId);
+  assert.strictEqual(after?.lastProcessedLedger, before?.lastProcessedLedger);
+  assert.strictEqual(after?.totalRoleAssignments, before?.totalRoleAssignments);
+  assert.ok(after?.signers.size === before?.signers.size);
+});
+
+test("Snapshot Rollback: known snapshot ID still restores successfully", async () => {
+  const adapter = new MemorySnapshotAdapter();
+  const service = new SnapshotService(adapter);
+  const contractId = "C_ROLLBACK_KNOWN_1";
+
+  await service.processEvent(
+    createMockEvent("k1", contractId, EventType.ROLE_ASSIGNED, 10, {
+      address: "G_DAN",
+      role: Role.ADMIN,
+    }),
+  );
+  const target = (await adapter.getSnapshotHistory(contractId))[0];
+
+  const result = await service.rollbackSnapshot(contractId, target.lastProcessedLedger, "ok", []);
+
+  assert.strictEqual(result.success, true);
+  assert.strictEqual(result.errorCode, undefined);
+  assert.strictEqual((await adapter.getSnapshot(contractId))?.lastProcessedLedger, 10);
+});
+
+test("Snapshot Rollback: unknown ID on adapter without restoreSnapshot returns SNAPSHOT_NOT_FOUND", async () => {
+  const base = new MemorySnapshotAdapter();
+  const adapter = {
+    getSnapshot: base.getSnapshot.bind(base),
+    saveSnapshot: base.saveSnapshot.bind(base),
+    clearSnapshot: base.clearSnapshot.bind(base),
+    getSnapshotHistory: base.getSnapshotHistory.bind(base),
+  };
+  const service = new SnapshotService(adapter as any);
+  const contractId = "C_ROLLBACK_NO_RESTORE_1";
+
+  await service.processEvent(
+    createMockEvent("n1", contractId, EventType.ROLE_ASSIGNED, 10, {
+      address: "G_ERIN",
+      role: Role.TREASURER,
+    }),
+  );
+  const before = await base.getSnapshot(contractId);
+
+  const result = await service.rollbackSnapshot(contractId, 999, "missing", []);
+
+  assert.strictEqual(result.success, false);
+  assert.strictEqual(result.errorCode, "SNAPSHOT_NOT_FOUND");
+  assert.strictEqual((await base.getSnapshot(contractId))?.lastProcessedLedger, before?.lastProcessedLedger);
+});
