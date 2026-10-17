@@ -4504,6 +4504,15 @@ impl VaultDAO {
         storage::set_config(&env, &config);
         storage::extend_instance_ttl(&env);
 
+        storage::create_audit_entry(
+            &env,
+            AuditAction::QuorumUpdated,
+            &admin,
+            storage::args_fingerprint(
+                &env,
+                soroban_sdk::vec![&env, quorum.into_val(&env)],
+            ),
+        );
         events::emit_config_updated(&env, &admin);
         events::emit_quorum_updated(&env, &admin, old_quorum, quorum);
 
@@ -4599,6 +4608,15 @@ impl VaultDAO {
 
         storage::set_voting_strategy(&env, &strategy);
         storage::extend_instance_ttl(&env);
+        storage::create_audit_entry(
+            &env,
+            AuditAction::VotingStrategyUpdated,
+            &admin,
+            storage::args_fingerprint(
+                &env,
+                soroban_sdk::vec![&env, strategy.into_val(&env)],
+            ),
+        );
         events::emit_config_updated(&env, &admin);
 
         Ok(())
@@ -4648,6 +4666,15 @@ impl VaultDAO {
         config.threshold_strategy = strategy;
         storage::set_config(&env, &config);
         storage::extend_instance_ttl(&env);
+        storage::create_audit_entry(
+            &env,
+            AuditAction::ThresholdStrategyUpdated,
+            &admin,
+            storage::args_fingerprint(
+                &env,
+                soroban_sdk::vec![&env, strategy.into_val(&env)],
+            ),
+        );
         events::emit_config_updated(&env, &admin);
 
         Ok(())
@@ -6922,6 +6949,15 @@ impl VaultDAO {
         storage::set_token_spending_config(&env, &token_cfg);
         storage::extend_instance_ttl(&env);
 
+        storage::create_audit_entry(
+            &env,
+            AuditAction::TokenConfigUpdated,
+            &admin,
+            storage::args_fingerprint(
+                &env,
+                soroban_sdk::vec![&env, token.into_val(&env), daily_limit.into_val(&env), weekly_limit.into_val(&env)],
+            ),
+        );
         events::emit_config_updated(&env, &admin);
 
         Ok(())
@@ -6984,6 +7020,15 @@ impl VaultDAO {
         storage::remove_token_spending_config(&env, &token);
         storage::extend_instance_ttl(&env);
 
+        storage::create_audit_entry(
+            &env,
+            AuditAction::TokenConfigUpdated,
+            &admin,
+            storage::args_fingerprint(
+                &env,
+                soroban_sdk::vec![&env, token.into_val(&env)],
+            ),
+        );
         events::emit_config_updated(&env, &admin);
 
         Ok(())
@@ -7060,6 +7105,15 @@ impl VaultDAO {
         storage::set_token_spending_config(&env, &token_cfg);
         storage::extend_instance_ttl(&env);
 
+        storage::create_audit_entry(
+            &env,
+            AuditAction::TokenConfigUpdated,
+            &admin,
+            storage::args_fingerprint(
+                &env,
+                soroban_sdk::vec![&env, token.into_val(&env), daily_limit.into_val(&env), weekly_limit.into_val(&env)],
+            ),
+        );
         events::emit_config_updated(&env, &admin);
 
         Ok(())
@@ -10658,6 +10712,15 @@ impl VaultDAO {
         storage::set_insurance_config(&env, &config);
         storage::extend_instance_ttl(&env);
 
+        storage::create_audit_entry(
+            &env,
+            AuditAction::InsuranceConfigUpdated,
+            &admin,
+            storage::args_fingerprint(
+                &env,
+                soroban_sdk::vec![&env, config.into_val(&env)],
+            ),
+        );
         events::emit_insurance_config_updated(&env, &admin);
 
         Ok(())
@@ -10715,6 +10778,15 @@ impl VaultDAO {
         storage::set_fee_structure(&env, &fee_structure);
         storage::extend_instance_ttl(&env);
 
+        storage::create_audit_entry(
+            &env,
+            AuditAction::FeeConfigUpdated,
+            &admin,
+            storage::args_fingerprint(
+                &env,
+                soroban_sdk::vec![&env, fee_structure.into_val(&env)],
+            ),
+        );
         events::emit_fee_structure_updated(&env, &admin, fee_structure.enabled);
 
         Ok(())
@@ -12279,6 +12351,15 @@ impl VaultDAO {
             return Err(VaultError::Unauthorized);
         }
         storage::set_dex_config(&env, &dex_config);
+        storage::create_audit_entry(
+            &env,
+            AuditAction::DexConfigUpdated,
+            &admin,
+            storage::args_fingerprint(
+                &env,
+                soroban_sdk::vec![&env, dex_config.into_val(&env)],
+            ),
+        );
         events::emit_dex_config_updated(&env, &admin);
         Ok(())
     }
@@ -12814,6 +12895,15 @@ impl VaultDAO {
         config.pre_execution_hooks.push_back(hook.clone());
         storage::set_config(&env, &config);
         storage::extend_instance_ttl(&env);
+        storage::create_audit_entry(
+            &env,
+            AuditAction::HookRegistered,
+            &admin,
+            storage::args_fingerprint(
+                &env,
+                soroban_sdk::vec![&env, hook.into_val(&env), true.into_val(&env)],
+            ),
+        );
         events::emit_hook_registered(&env, &hook, true);
         Ok(())
     }
@@ -12836,6 +12926,15 @@ impl VaultDAO {
         config.post_execution_hooks.push_back(hook.clone());
         storage::set_config(&env, &config);
         storage::extend_instance_ttl(&env);
+        storage::create_audit_entry(
+            &env,
+            AuditAction::HookRegistered,
+            &admin,
+            storage::args_fingerprint(
+                &env,
+                soroban_sdk::vec![&env, hook.into_val(&env), false.into_val(&env)],
+            ),
+        );
         events::emit_hook_registered(&env, &hook, false);
         Ok(())
     }
@@ -12860,6 +12959,15 @@ impl VaultDAO {
         config.pre_execution_hooks.remove(idx);
         storage::set_config(&env, &config);
         storage::extend_instance_ttl(&env);
+        storage::create_audit_entry(
+            &env,
+            AuditAction::HookRemoved,
+            &admin,
+            storage::args_fingerprint(
+                &env,
+                soroban_sdk::vec![&env, hook.into_val(&env), true.into_val(&env)],
+            ),
+        );
         events::emit_hook_removed(&env, &hook, true);
         Ok(())
     }
@@ -12884,6 +12992,15 @@ impl VaultDAO {
         config.post_execution_hooks.remove(idx);
         storage::set_config(&env, &config);
         storage::extend_instance_ttl(&env);
+        storage::create_audit_entry(
+            &env,
+            AuditAction::HookRemoved,
+            &admin,
+            storage::args_fingerprint(
+                &env,
+                soroban_sdk::vec![&env, hook.into_val(&env), false.into_val(&env)],
+            ),
+        );
         events::emit_hook_removed(&env, &hook, false);
         Ok(())
     }
@@ -12964,6 +13081,15 @@ impl VaultDAO {
         storage::set_keeper_hook_count(&env, total + 1);
         storage::extend_instance_ttl(&env);
 
+        storage::create_audit_entry(
+            &env,
+            AuditAction::KeeperHookRegistered,
+            &signer,
+            storage::args_fingerprint(
+                &env,
+                soroban_sdk::vec![&env, keeper.into_val(&env), event_type.into_val(&env), callback_contract.into_val(&env), max_fee.into_val(&env)],
+            ),
+        );
         events::emit_keeper_hook_registered(&env, &keeper, event_type_id, &callback_contract);
         Ok(())
     }
@@ -13006,6 +13132,15 @@ impl VaultDAO {
         storage::set_keeper_hook_count(&env, total.saturating_sub(1));
         storage::extend_instance_ttl(&env);
 
+        storage::create_audit_entry(
+            &env,
+            AuditAction::KeeperHookRemoved,
+            &signer,
+            storage::args_fingerprint(
+                &env,
+                soroban_sdk::vec![&env, keeper.into_val(&env), event_type.into_val(&env)],
+            ),
+        );
         events::emit_keeper_hook_removed(&env, &keeper, event_type_id);
         Ok(())
     }
@@ -14746,6 +14881,15 @@ impl VaultDAO {
 
         storage::set_time_weighted_config(&env, &config);
         storage::extend_instance_ttl(&env);
+        storage::create_audit_entry(
+            &env,
+            AuditAction::TimeWeightedConfigUpdated,
+            &admin,
+            storage::args_fingerprint(
+                &env,
+                soroban_sdk::vec![&env, config.into_val(&env)],
+            ),
+        );
         events::emit_config_param_changed(&env, Symbol::new(&env, "time_weighted"), &admin);
 
         Ok(())
@@ -15006,6 +15150,15 @@ impl VaultDAO {
         storage::set_permissions(&env, &target, grants);
         storage::extend_instance_ttl(&env);
 
+        storage::create_audit_entry(
+            &env,
+            AuditAction::PermissionGranted,
+            &admin,
+            storage::args_fingerprint(
+                &env,
+                soroban_sdk::vec![&env, target.into_val(&env), permission.into_val(&env), expires_at.into_val(&env)],
+            ),
+        );
         events::emit_permission_granted(&env, &admin, &target, permission as u32);
         Ok(())
     }
@@ -15044,6 +15197,15 @@ impl VaultDAO {
         storage::set_permissions(&env, &target, updated);
         storage::extend_instance_ttl(&env);
 
+        storage::create_audit_entry(
+            &env,
+            AuditAction::PermissionRevoked,
+            &admin,
+            storage::args_fingerprint(
+                &env,
+                soroban_sdk::vec![&env, target.into_val(&env), permission.into_val(&env)],
+            ),
+        );
         events::emit_permission_revoked(&env, &admin, &target, permission as u32);
         Ok(())
     }
@@ -18380,6 +18542,15 @@ impl VaultDAO {
         }
         let old_tier = storage::get_signer_tier(&env, &signer);
         storage::set_signer_tier(&env, &signer, &tier);
+        storage::create_audit_entry(
+            &env,
+            AuditAction::SignerTierUpdated,
+            &admin,
+            storage::args_fingerprint(
+                &env,
+                soroban_sdk::vec![&env, signer.into_val(&env), tier.into_val(&env)],
+            ),
+        );
         events::emit_signer_tier_changed(&env, &signer, &old_tier, &tier);
         Ok(())
     }
