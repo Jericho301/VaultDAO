@@ -879,6 +879,40 @@ fn test_reactivate_expired_subscription() {
 }
 
 #[test]
+fn test_reactivate_preserves_manual_renew_setting() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, _token_admin, token) = setup(&env);
+    let subscriber = Address::generate(&env);
+    let provider = Address::generate(&env);
+
+    fund_subscriber(&env, &token, &subscriber, 100_000);
+
+    let id = client.create_subscription(
+        &subscriber,
+        &provider,
+        &SubscriptionTier::Basic,
+        &token,
+        &100i128,
+        &500u64,
+        &false,
+        &50u64,
+    );
+
+    let sub = client.get_subscription(&id);
+    let advance = sub.next_renewal_ledger + 51 - env.ledger().sequence() as u64;
+    env.ledger()
+        .with_mut(|l| l.sequence_number += advance as u32);
+    client.expire_overdue_subscriptions(&subscriber, &1u64, &100u32);
+
+    client.reactivate_subscription(&subscriber, &id);
+    let reactivated = client.get_subscription(&id);
+    assert_eq!(reactivated.status, SubscriptionStatus::Active);
+    assert!(!reactivated.auto_renew);
+}
+
+#[test]
 fn test_create_subscription_unsupported_token_fails() {
     let env = Env::default();
     env.mock_all_auths();
@@ -991,38 +1025,4 @@ fn test_expire_overdue_subscriptions_zero_scan_fails() {
 
     let res = client.try_expire_overdue_subscriptions(&subscriber, &1u64, &0u32);
     assert_eq!(res, Err(Ok(VaultError::InvalidAmount)));
-}
-
-#[test]
-fn test_reactivate_preserves_manual_renew_setting() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let (client, _admin, _token_admin, token) = setup(&env);
-    let subscriber = Address::generate(&env);
-    let provider = Address::generate(&env);
-
-    fund_subscriber(&env, &token, &subscriber, 100_000);
-
-    let id = client.create_subscription(
-        &subscriber,
-        &provider,
-        &SubscriptionTier::Basic,
-        &token,
-        &100i128,
-        &500u64,
-        &false,
-        &50u64,
-    );
-
-    let sub = client.get_subscription(&id);
-    let advance = sub.next_renewal_ledger + 51 - env.ledger().sequence() as u64;
-    env.ledger()
-        .with_mut(|l| l.sequence_number += advance as u32);
-    client.expire_overdue_subscriptions(&subscriber, &1u64, &100u32);
-
-    client.reactivate_subscription(&subscriber, &id);
-    let reactivated = client.get_subscription(&id);
-    assert_eq!(reactivated.status, SubscriptionStatus::Active);
-    assert!(!reactivated.auto_renew);
 }

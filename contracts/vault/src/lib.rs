@@ -12274,6 +12274,51 @@ impl VaultDAO {
         storage::get_dex_config(&env)
     }
 
+    /// Apply the transfer-equivalent spending controls to a swap's input amount and
+    /// reserve it against the daily, weekly and per-token counters.
+    fn check_and_reserve_swap_spend(
+        env: &Env,
+        config: &Config,
+        proposer: &Address,
+        token_in: &Address,
+        amount: i128,
+    ) -> Result<(), VaultError> {
+        if amount <= 0 {
+            return Err(VaultError::InvalidAmount);
+        }
+        if !storage::check_and_update_velocity(env, proposer, token_in, &config.velocity_limit) {
+            return Err(VaultError::VelocityLimitExceeded);
+        }
+        if amount > config.spending_limit {
+            return Err(VaultError::ExceedsProposalLimit);
+        }
+        let today = storage::get_day_number(env);
+        let week = storage::get_week_number(env);
+        if storage::get_daily_spent(env, today) + amount > config.daily_limit {
+            return Err(VaultError::ExceedsDailyLimit);
+        }
+        if storage::get_weekly_spent(env, week) + amount > config.weekly_limit {
+            return Err(VaultError::ExceedsWeeklyLimit);
+        }
+        if let Some(token_cfg) = storage::get_token_spending_config(env, token_in) {
+            if storage::get_token_daily_spent(env, token_in, today) + amount > token_cfg.daily_limit
+            {
+                return Err(VaultError::ExceedsTokenDailyLimit);
+            }
+            if storage::get_token_weekly_spent(env, token_in, week) + amount
+                > token_cfg.weekly_limit
+            {
+                return Err(VaultError::ExceedsTokenWeeklyLimit);
+            }
+        }
+
+        storage::add_daily_spent(env, today, amount);
+        storage::add_weekly_spent(env, week, amount);
+        storage::add_token_daily_spent(env, token_in, today, amount);
+        storage::add_token_weekly_spent(env, token_in, week, amount);
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn propose_swap(
         env: Env,
@@ -12303,15 +12348,39 @@ impl VaultDAO {
         if !dex_config.enabled_dexs.contains(dex_addr) {
             return Err(VaultError::DexError);
         }
+        if storage::get_pause_state(&env).is_paused {
+            return Err(VaultError::VaultPaused);
+        }
+
+        // A swap moves `amount_in` of `token_in` out of the vault, so it must pass the
+        // same spending controls as a transfer (#1926).
+        let (swap_token_in, swap_amount) = match &swap_op {
+            SwapProposal::Swap(_, token_in, token_out, amount_in, _) => {
+                if !config.supported_tokens.contains(token_in)
+                    || !config.supported_tokens.contains(token_out)
+                {
+                    return Err(VaultError::TokenNotSupported);
+                }
+                Self::check_and_reserve_swap_spend(&env, &config, &proposer, token_in, *amount_in)?;
+                (Some(token_in.clone()), *amount_in)
+            }
+            _ => (None, 0),
+        };
 
         let current_ledger = env.ledger().sequence() as u64;
+        let swap_unlock_ledger = match swap_token_in {
+            Some(_) if swap_amount >= config.timelock_threshold => {
+                current_ledger + config.timelock_delay
+            }
+            _ => 0,
+        };
         let proposal_id = storage::increment_proposal_id(&env);
         let proposal = Proposal {
             id: proposal_id,
             proposer: proposer.clone(),
             recipient: env.current_contract_address(),
             token: env.current_contract_address(),
-            amount: 0,
+            amount: swap_amount,
             memo: Symbol::new(&env, "swap"),
             metadata: Map::new(&env),
             tags: Vec::new(&env),
@@ -12325,7 +12394,7 @@ impl VaultDAO {
             condition_logic,
             created_at: current_ledger,
             expires_at: calculate_expiration_ledger(&config, &priority, current_ledger),
-            unlock_ledger: 0,
+            unlock_ledger: swap_unlock_ledger,
             execution_time: None,
             execution_window_ledgers: 0,
             insurance_amount,
