@@ -1,5 +1,6 @@
 import type { AuditEntry } from './auditVerification';
 import { escapeHtml } from './escapeHtml';
+import { RULE_STATUS_LABEL, type RuleResult } from './complianceRules';
 
 /**
  * Preview markup for the compliance report screen.
@@ -21,14 +22,9 @@ export interface ComplianceExportPreviewData {
   reportType: string;
   vaultAddress: string;
   reportPeriod: { start: string; end: string };
-  complianceScore: number;
-  sections: string[];
-  entries: AuditEntry[];
-}
-
-function matchedEventCount(entries: AuditEntry[], section: string): number {
-  const keyword = section.split(' ')[0].toLowerCase();
-  return entries.filter(e => e.action.toLowerCase().includes(keyword)).length;
+  /** null when no rule had data to evaluate */
+  complianceScore: number | null;
+  rules: RuleResult[];
 }
 
 export function buildReportPreviewHtml(config: ReportPreviewConfig): string {
@@ -78,12 +74,20 @@ export function buildReportPreviewHtml(config: ReportPreviewConfig): string {
       `;
 }
 
+function scoreColor(score: number | null): string {
+  if (score === null) return '#525252';
+  return score >= 80 ? '#166534' : score >= 60 ? '#854d0e' : '#7f1d1d';
+}
+
+function scoreLabel(score: number | null): string {
+  return score === null ? 'Not evaluated' : `${score}%`;
+}
+
 export function buildPdfPreviewHtml(data: ComplianceExportPreviewData): string {
-  const previewRows = data.sections
-    .map((s, i) => {
-      const matched = matchedEventCount(data.entries, s);
-      const status = matched > 0 || i % 3 !== 2 ? '✓ COMPLIANT' : '⚠ REVIEW';
-      return `<tr><td style="padding:6px 10px;border-bottom:1px solid #333">${escapeHtml(s)}</td><td style="padding:6px 10px;border-bottom:1px solid #333;text-align:center">${matched}</td><td style="padding:6px 10px;border-bottom:1px solid #333;color:${status.startsWith('✓') ? '#4ade80' : '#f87171'};font-weight:600">${escapeHtml(status)}</td></tr>`;
+  const previewRows = data.rules
+    .map((r) => {
+      const statusColor = r.status === 'compliant' ? '#4ade80' : r.status === 'review' ? '#f87171' : '#a3a3a3';
+      return `<tr><td style="padding:6px 10px;border-bottom:1px solid #333">${escapeHtml(r.label)}</td><td style="padding:6px 10px;border-bottom:1px solid #333;text-align:center">${r.evaluated}</td><td style="padding:6px 10px;border-bottom:1px solid #333;text-align:center">${r.violations}</td><td style="padding:6px 10px;border-bottom:1px solid #333;color:${statusColor};font-weight:600">${escapeHtml(RULE_STATUS_LABEL[r.status])}</td></tr>`;
     })
     .join('');
   return `
@@ -94,24 +98,30 @@ export function buildPdfPreviewHtml(data: ComplianceExportPreviewData): string {
           </div>
           <p><strong>Vault:</strong> <code style="font-size:11px">${escapeHtml(data.vaultAddress)}</code></p>
           <p><strong>Period:</strong> ${escapeHtml(new Date(data.reportPeriod.start).toLocaleDateString())} – ${escapeHtml(new Date(data.reportPeriod.end).toLocaleDateString())}</p>
-          <div style="display:inline-block;background:${data.complianceScore>=80?'#166534':data.complianceScore>=60?'#854d0e':'#7f1d1d'};padding:4px 14px;border-radius:20px;font-weight:bold;margin-bottom:16px">Score: ${data.complianceScore}%</div>
+          <div style="display:inline-block;background:${scoreColor(data.complianceScore)};padding:4px 14px;border-radius:20px;font-weight:bold;margin-bottom:16px">Score: ${escapeHtml(scoreLabel(data.complianceScore))}</div>
           <table style="width:100%;border-collapse:collapse;margin-top:8px">
-            <thead><tr style="background:#2a2a2a"><th style="padding:8px 10px;text-align:left">Rule</th><th style="padding:8px 10px">Events</th><th style="padding:8px 10px">Status</th></tr></thead>
+            <thead><tr style="background:#2a2a2a"><th style="padding:8px 10px;text-align:left">Rule</th><th style="padding:8px 10px">Events Evaluated</th><th style="padding:8px 10px">Violations</th><th style="padding:8px 10px">Status</th></tr></thead>
             <tbody>${previewRows}</tbody>
           </table>
-          <p style="color:#999;font-size:11px;margin-top:16px">This is a preview. Click "Download PDF" to save the full formatted report.</p>
+          <p style="color:#999;font-size:11px;margin-top:16px">This is a preview. Only the rules listed are evaluated; a rule with no matching audit events is reported as not evaluated. Click "Download PDF" to save the full formatted report.</p>
         </div>`;
 }
 
 export function buildCsvPreviewHtml(data: ComplianceExportPreviewData): string {
-  const headers = ['Rule/Section', 'Report Type', 'Vault Address', 'Period Start', 'Period End', 'Compliance Score', 'Matched Events', 'Status'];
-  const rows = data.sections.map((s, i) => {
-    const matched = matchedEventCount(data.entries, s);
-    const status = matched > 0 || i % 3 !== 2 ? 'COMPLIANT' : 'REVIEW';
-    return [s, data.reportType, data.vaultAddress.slice(0, 12) + '…', data.reportPeriod.start, data.reportPeriod.end, `${data.complianceScore}%`, matched, status];
-  });
+  const headers = ['Rule', 'Report Type', 'Vault Address', 'Period Start', 'Period End', 'Compliance Score', 'Events Evaluated', 'Violations', 'Status'];
+  const rows = data.rules.map((r) => [
+    r.label,
+    data.reportType,
+    data.vaultAddress.slice(0, 12) + '…',
+    data.reportPeriod.start,
+    data.reportPeriod.end,
+    scoreLabel(data.complianceScore),
+    String(r.evaluated),
+    String(r.violations),
+    RULE_STATUS_LABEL[r.status],
+  ]);
   const headerHtml = headers.map((h) => `<th style="padding:6px 10px;background:#2a2a2a;border-bottom:2px solid #581c87;text-align:left">${escapeHtml(h)}</th>`).join('');
-  const rowsHtml = rows.map((r) => `<tr>${r.map((c, ci) => `<td style="padding:5px 10px;border-bottom:1px solid #333;${ci === 7 ? `color:${c === 'COMPLIANT' ? '#4ade80' : '#f87171'};font-weight:600` : ''}">${escapeHtml(c)}</td>`).join('')}</tr>`).join('');
+  const rowsHtml = rows.map((r) => `<tr>${r.map((c, ci) => `<td style="padding:5px 10px;border-bottom:1px solid #333;${ci === 8 ? `color:${c === RULE_STATUS_LABEL.compliant ? '#4ade80' : c === RULE_STATUS_LABEL.review ? '#f87171' : '#a3a3a3'};font-weight:600` : ''}">${escapeHtml(c)}</td>`).join('')}</tr>`).join('');
   return `
         <div style="padding:20px;font-family:Arial,sans-serif;background:#1a1a1a;color:#fff">
           <h3 style="color:#a855f7;margin-bottom:12px">${escapeHtml(data.reportType)} CSV Preview</h3>

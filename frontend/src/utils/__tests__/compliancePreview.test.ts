@@ -66,8 +66,7 @@ describe('compliance preview markup', () => {
     vaultAddress: PAYLOAD,
     reportPeriod: { start: '2026-01-01', end: '2026-01-31' },
     complianceScore: 90,
-    sections: [PAYLOAD],
-    entries: [hostile],
+    rules: [{ id: 'timelock', label: PAYLOAD, evaluated: 1, violations: 0, status: 'compliant' as const }],
   };
 
   it('escapes every interpolated value in the PDF preview', () => {
@@ -84,10 +83,28 @@ describe('compliance preview markup', () => {
     expect(html).toContain(escapeHtml(PAYLOAD));
   });
 
-  it('still renders the section rows and score for benign input', () => {
-    const html = buildPdfPreviewHtml({ ...exportData, reportType: 'SOC2', vaultAddress: 'CVAULT', sections: ['Security'], entries: [] });
+  it('renders the rule row and score for benign input', () => {
+    const html = buildPdfPreviewHtml({
+      ...exportData,
+      reportType: 'SOC2',
+      vaultAddress: 'CVAULT',
+      rules: [{ id: 'timelock', label: 'Timelock adherence', evaluated: 2, violations: 0, status: 'compliant' }],
+    });
 
     expect(html).toContain('Score: 90%');
-    expect(html).toContain('<td style="padding:6px 10px;border-bottom:1px solid #333">Security</td>');
+    expect(html).toContain('>Timelock adherence</td>');
+    expect(html).toContain('COMPLIANT');
+  });
+
+  it('shows "Not evaluated" instead of a score when no rule has data', () => {
+    const html = buildPdfPreviewHtml({
+      ...exportData,
+      complianceScore: null,
+      rules: [{ id: 'timelock', label: 'Timelock adherence', evaluated: 0, violations: 0, status: 'not_evaluated' }],
+    });
+
+    expect(html).toContain('Score: Not evaluated');
+    expect(html).toContain('NOT EVALUATED');
+    expect(html).not.toContain('Score: 0%');
   });
 });

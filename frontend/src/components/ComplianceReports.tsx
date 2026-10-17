@@ -8,6 +8,7 @@ import type { AuditEntry } from '../utils/auditVerification';
 import { prepareChainedAuditLog } from '../utils/auditVerification';
 import { env } from '../config/env';
 import { buildReportPreviewHtml, buildPdfPreviewHtml, buildCsvPreviewHtml } from '../utils/compliancePreview';
+import { evaluateComplianceRules } from '../utils/complianceRules';
 
 type ReportType = 'SOC2' | 'ISO27001' | 'Custom';
 type ScheduleFrequency = 'weekly' | 'monthly';
@@ -284,14 +285,18 @@ const ComplianceReports: React.FC = () => {
     }
   };
 
-  const buildExportData = () => ({
-    vaultAddress: env.contractId,
-    reportPeriod: { start: config.startDate, end: config.endDate },
-    complianceScore: Math.max(0, Math.min(100, Math.round(80 + (filterDataByDateRange().length % 20)))),
-    sections: config.sections,
-    entries: filterDataByDateRange(),
-    reportType: config.type,
-  });
+  const buildExportData = () => {
+    const entries = filterDataByDateRange();
+    const { rules, score } = evaluateComplianceRules(entries);
+    return {
+      vaultAddress: env.contractId,
+      reportPeriod: { start: config.startDate, end: config.endDate },
+      complianceScore: score,
+      rules,
+      entries,
+      reportType: config.type,
+    };
+  };
 
   const handleExportPDFPreview = async () => {
     setGenerating(true);
