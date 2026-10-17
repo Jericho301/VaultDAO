@@ -167,3 +167,29 @@ test("getTransactionByHashController returns 404 for unknown tx hash", async () 
   assert.equal(body.success, false);
   assert.equal(body.error.message, "Transaction not found");
 });
+
+test("TransactionsService rebuilding the index keeps proposal results stable", async () => {
+  const records = [
+    makeExecutedRecord(1, { txHash: "tx-a" }),
+    makeExecutedRecord(2, { txHash: "tx-b" }),
+    makeExecutedRecord(3, { txHash: "tx-c" }),
+  ];
+  // Same proposal for every record so byProposal arrays would grow on each rebuild.
+  for (const record of records) record.proposalId = "proposal-shared";
+
+  const service = new TransactionsService(createPersistence(records));
+  const contractId = "contract-1";
+
+  let firstCount = -1;
+  for (let i = 0; i < 5; i++) {
+    (service as any).invalidateIndex(contractId);
+    const txs = await service.getTransactionsByProposal("proposal-shared", contractId);
+    if (firstCount === -1) firstCount = txs.length;
+    assert.strictEqual(txs.length, firstCount, `rebuild ${i} changed result count`);
+  }
+  assert.strictEqual(firstCount, 3);
+
+  const internal = (service as any).index;
+  assert.strictEqual(internal.getByProposal(contractId, "proposal-shared")?.length, 3);
+  assert.strictEqual(internal.getByHash(contractId, "tx-a") !== undefined, true);
+});

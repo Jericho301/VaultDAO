@@ -21,44 +21,60 @@ interface IndexedEntry {
   timestampMs: number;
 }
 
+interface ContractIndex {
+  all: IndexedEntry[];
+  byHash: Map<string, IndexedEntry>;
+  byProposal: Map<string, IndexedEntry[]>;
+  sortedByAmount: IndexedEntry[];
+}
+
+/**
+ * Per-contract index. Each contract owns its own maps, so clearing or
+ * rebuilding a contract drops every structure it had (no stale entries).
+ */
 class TransactionIndex {
-  private byContract = new Map<string, IndexedEntry[]>();
-  private byHash = new Map<string, IndexedEntry>();
-  private byProposal = new Map<string, IndexedEntry[]>();
-  private sortedByAmount = new Map<string, IndexedEntry[]>();
+  private contracts = new Map<string, ContractIndex>();
 
   clear(contractId: string): void {
-    this.byContract.delete(contractId);
-    this.sortedByAmount.delete(contractId);
+    this.contracts.delete(contractId);
   }
 
-  addAll(contractId: string, entries: IndexedEntry[]): void {
-    this.byContract.set(contractId, entries);
+  /**
+   * Builds a fresh index for the contract and swaps it in atomically.
+   * The previous index stays visible until the new one is complete.
+   */
+  replace(contractId: string, entries: IndexedEntry[]): void {
+    const byHash = new Map<string, IndexedEntry>();
+    const byProposal = new Map<string, IndexedEntry[]>();
     for (const entry of entries) {
-      this.byHash.set(`${contractId}:${entry.tx.transactionHash}`, entry);
-      const key = `${contractId}:${entry.tx.proposalId}`;
-      const arr = this.byProposal.get(key) ?? [];
+      byHash.set(entry.tx.transactionHash, entry);
+      const arr = byProposal.get(entry.tx.proposalId) ?? [];
       arr.push(entry);
-      this.byProposal.set(key, arr);
+      byProposal.set(entry.tx.proposalId, arr);
     }
-    const sorted = [...entries].sort((a, b) => a.amount - b.amount);
-    this.sortedByAmount.set(contractId, sorted);
+    const sortedByAmount = [...entries].sort((a, b) => a.amount - b.amount);
+    this.contracts.set(contractId, {
+      all: entries,
+      byHash,
+      byProposal,
+      sortedByAmount,
+    });
   }
 
   getByContract(contractId: string): IndexedEntry[] | undefined {
-    return this.byContract.get(contractId);
+    return this.contracts.get(contractId)?.all;
   }
 
   getByHash(contractId: string, hash: string): IndexedEntry | undefined {
-    return this.byHash.get(`${contractId}:${hash}`);
+    return this.contracts.get(contractId)?.byHash.get(hash);
   }
 
   getByProposal(contractId: string, proposalId: string): IndexedEntry[] | undefined {
-    return this.byProposal.get(`${contractId}:${proposalId}`);
+    return this.contracts.get(contractId)?.byProposal.get(proposalId);
   }
 
   rangeByAmount(contractId: string, min: number, max: number): IndexedEntry[] {
-    const sorted = this.sortedByAmount.get(contractId);
+    const sorted = this.contracts.get(contractId)?.sortedByAmount;
     if (!sorted) return [];
     let lo = 0;
     let hi = sorted.length;
@@ -138,8 +154,7 @@ export class TransactionsService {
         };
       });
 
-    this.index.clear(contractId);
-    this.index.addAll(contractId, entries);
+    this.index.replace(contractId, entries);
     this.indexTimestamps.set(contractId, now);
     return entries;
   }
