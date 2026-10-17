@@ -655,3 +655,14 @@ export interface StakeRecord {
   accumulatedRewards: bigint;
 }
 
+/** Recipient filtering mode (mirrors the contract's `ListMode`). */
+export type ListMode = "Disabled" | "Whitelist" | "Blacklist";
+
+/** Per-token spending limits (mirrors the contract's `TokenSpendingConfig`). */
+export interface TokenSpendingConfig {
+  token: string;
+  dailyLimit: bigint;
+  weeklyLimit: bigint;
+  isDefault: boolean;
+}
+

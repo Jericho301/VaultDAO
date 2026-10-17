@@ -40,6 +40,8 @@ export type {
   InsuranceClaimStatus,
   StakeRecord,
   StakingConfig,
+  ListMode,
+  TokenSpendingConfig,
 } from "./types";
 
 // Enums & errors
@@ -162,6 +164,19 @@ export {
   proposeStakeWithdrawal,
   getStakeRecord,
   getStakingConfig,
+  // Recipient policy
+  setListMode,
+  addToWhitelist,
+  addToBlacklist,
+  bulkAddToWhitelist,
+  bulkRemoveFromWhitelist,
+  bulkAddToBlacklist,
+  bulkRemoveFromBlacklist,
+  // Token allowlist
+  addSupportedToken,
+  removeSupportedToken,
+  setTokenLimits,
+  getSupportedTokens,
 } from "./contract";
 
 // Token flows: vesting, token locks, escrow, funding rounds

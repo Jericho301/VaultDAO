@@ -76,6 +76,17 @@ import {
   proposeStakeWithdrawal,
   getStakeRecord,
   getStakingConfig,
+  setListMode,
+  addToWhitelist,
+  addToBlacklist,
+  bulkAddToWhitelist,
+  bulkRemoveFromWhitelist,
+  bulkAddToBlacklist,
+  bulkRemoveFromBlacklist,
+  addSupportedToken,
+  removeSupportedToken,
+  setTokenLimits,
+  getSupportedTokens,
 } from "./contract";
 import {
   getContract,
@@ -427,6 +438,161 @@ describe("contract.ts bindings", () => {
         delegateVotingPower(
           "GDELEG",
           { delegate: "GDEST", expiryLedger: -1n },
+          opts,
+        ),
+      ).rejects.toThrow();
+      expect(buildTransaction).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("Recipient Policy and Token Allowlist", () => {
+    it("setListMode encodes the admin and the list mode enum", async () => {
+      await setListMode("GADMIN", "Whitelist", opts);
+      expect(contractCallSpy).toHaveBeenCalledWith(
+        "set_list_mode",
+        "addr:GADMIN",
+        "enum:Whitelist",
+      );
+    });
+
+    it("addToWhitelist and addToBlacklist encode admin and address", async () => {
+      await addToWhitelist("GADMIN", "GRECIP", opts);
+      await addToBlacklist("GADMIN", "GBAD", opts);
+      expect(contractCallSpy).toHaveBeenCalledWith(
+        "add_to_whitelist",
+        "addr:GADMIN",
+        "addr:GRECIP",
+      );
+      expect(contractCallSpy).toHaveBeenCalledWith(
+        "add_to_blacklist",
+        "addr:GADMIN",
+        "addr:GBAD",
+      );
+    });
+
+    it("bulkAddToWhitelist returns one transaction for a list within the contract limit", async () => {
+      const txs = await bulkAddToWhitelist("GADMIN", ["GA", "GB", "GC"], opts);
+      expect(txs).toEqual(["FAKE_TX_XDR"]);
+      expect(contractCallSpy).toHaveBeenCalledTimes(1);
+      expect(contractCallSpy).toHaveBeenCalledWith(
+        "bulk_add_to_whitelist",
+        "addr:GADMIN",
+        "vec:3",
+      );
+    });
+
+    it("bulk operations split lists larger than 50 into chunks", async () => {
+      const addresses = Array.from({ length: 120 }, (_, i) => `G${i}`);
+      const txs = await bulkRemoveFromBlacklist("GADMIN", addresses, opts);
+
+      expect(txs).toHaveLength(3);
+      expect(contractCallSpy).toHaveBeenNthCalledWith(
+        1,
+        "bulk_remove_from_blacklist",
+        "addr:GADMIN",
+        "vec:50",
+      );
+      expect(contractCallSpy).toHaveBeenNthCalledWith(
+        2,
+        "bulk_remove_from_blacklist",
+        "addr:GADMIN",
+        "vec:50",
+      );
+      expect(contractCallSpy).toHaveBeenNthCalledWith(
+        3,
+        "bulk_remove_from_blacklist",
+        "addr:GADMIN",
+        "vec:20",
+      );
+    });
+
+    it("bulk operations chunk exactly at the 50-address boundary without an empty tail", async () => {
+      const addresses = Array.from({ length: 50 }, (_, i) => `G${i}`);
+      const txs = await bulkAddToBlacklist("GADMIN", addresses, opts);
+      expect(txs).toHaveLength(1);
+      expect(contractCallSpy).toHaveBeenCalledWith(
+        "bulk_add_to_blacklist",
+        "addr:GADMIN",
+        "vec:50",
+      );
+    });
+
+    it("bulkRemoveFromWhitelist calls the whitelist removal entry point", async () => {
+      await bulkRemoveFromWhitelist("GADMIN", ["GA"], opts);
+      expect(contractCallSpy).toHaveBeenCalledWith(
+        "bulk_remove_from_whitelist",
+        "addr:GADMIN",
+        "vec:1",
+      );
+    });
+
+    it("addSupportedToken encodes token and both spending limits", async () => {
+      await addSupportedToken(
+        "GADMIN",
+        { token: "CTOKEN", dailyLimit: 500n, weeklyLimit: 2000n },
+        opts,
+      );
+      expect(contractCallSpy).toHaveBeenCalledWith(
+        "add_supported_token",
+        "addr:GADMIN",
+        "addr:CTOKEN",
+        "i128:500",
+        "i128:2000",
+      );
+    });
+
+    it("removeSupportedToken encodes admin and token", async () => {
+      await removeSupportedToken("GADMIN", "CTOKEN", opts);
+      expect(contractCallSpy).toHaveBeenCalledWith(
+        "remove_supported_token",
+        "addr:GADMIN",
+        "addr:CTOKEN",
+      );
+    });
+
+    it("setTokenLimits encodes token and both spending limits", async () => {
+      await setTokenLimits(
+        "GADMIN",
+        { token: "CTOKEN", dailyLimit: 100n, weeklyLimit: 700n },
+        opts,
+      );
+      expect(contractCallSpy).toHaveBeenCalledWith(
+        "set_token_limits",
+        "addr:GADMIN",
+        "addr:CTOKEN",
+        "i128:100",
+        "i128:700",
+      );
+    });
+
+    it("getSupportedTokens maps each entry into camelCase fields", async () => {
+      serverMock.getAccount.mockResolvedValue({ accountId: () => "GCALLER" });
+      serverMock.simulateTransaction.mockResolvedValue({
+        transactionData: {},
+        result: { retval: {} },
+      });
+      (decodeScVal as Mock).mockReturnValue([
+        { token: "CTOKEN", daily_limit: 500n, weekly_limit: 2000n, is_default: true },
+      ]);
+
+      const tokens = await getSupportedTokens("GCALLER", opts);
+
+      expect(contractCallSpy).toHaveBeenCalledWith("get_supported_tokens");
+      expect(tokens).toEqual([
+        { token: "CTOKEN", dailyLimit: 500n, weeklyLimit: 2000n, isDefault: true },
+      ]);
+    });
+
+    it("rejects invalid inputs before building a transaction", async () => {
+      await expect(setListMode("", "Disabled", opts)).rejects.toThrow();
+      await expect(bulkAddToWhitelist("GADMIN", [], opts)).rejects.toThrow();
+      await expect(
+        bulkAddToWhitelist("GADMIN", ["GA", ""], opts),
+      ).rejects.toThrow();
+      await expect(
+        addSupportedToken(
+          "GADMIN",
+          { token: "CTOKEN", dailyLimit: -1n, weeklyLimit: 0n },
           opts,
         ),
       ).rejects.toThrow();

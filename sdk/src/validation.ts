@@ -27,6 +27,16 @@ export function validateNonEmptyString(field: string, value: unknown): void {
   }
 }
 
+export function validateAddressList(field: string, value: unknown): void {
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    value.some((item) => typeof item !== "string" || item.trim().length === 0)
+  ) {
+    fail(field, value, `${field} must be a non-empty array of non-empty strings`);
+  }
+}
+
 export function validatePositiveBigInt(field: string, value: unknown): void {
   if (typeof value !== "bigint" || value <= 0n) {
     fail(field, value, `${field} must be a positive bigint`);

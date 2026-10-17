@@ -29,6 +29,8 @@ import type {
   InsuranceClaimStatus,
   StakeRecord,
   StakingConfig,
+  ListMode,
+  TokenSpendingConfig,
 } from "./types";
 import { Role, ProposalStatus, VaultError, VaultErrorCode, noopLogger } from "./types";
 import type { SdkLogger } from "./types";
@@ -62,6 +64,7 @@ import {
   validateId,
   validateStreamLedgers,
   validateInitConfig,
+  validateAddressList,
   SdkValidationError,
 } from "./validation";
 
@@ -928,6 +931,279 @@ function decodeStakingConfig(raw: Record<string, unknown>): StakingConfig {
     compoundEpoch: raw.compound_epoch as bigint,
     rewardBpsPerExecution: raw.reward_bps_per_execution as number,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Recipient Policy (whitelist / blacklist / list mode)
+// ---------------------------------------------------------------------------
+
+/** Maximum addresses the contract accepts in one `bulk_*` call. */
+const BULK_ADDRESS_CHUNK_SIZE = 50;
+
+/**
+ * Build a transaction to set the recipient list mode. Only Admin can call this.
+ *
+ * @param adminPublicKey - Admin's address.
+ * @param mode           - `"Disabled"`, `"Whitelist"`, or `"Blacklist"`.
+ * @param opts           - SDK connection options.
+ */
+export async function setListMode(
+  adminPublicKey: string,
+  mode: ListMode,
+  opts: SdkOptions
+): Promise<string> {
+  validateNonEmptyString("adminPublicKey", adminPublicKey);
+
+  const contract = getContract(opts);
+  const op = contract.call(
+    "set_list_mode",
+    addressToScVal(adminPublicKey),
+    enumToScVal(mode)
+  );
+  return invokeMethod("set_list_mode", adminPublicKey, op, opts);
+}
+
+/**
+ * Build a transaction to add one address to the whitelist. Only Admin can call this.
+ *
+ * @param adminPublicKey - Admin's address.
+ * @param address        - Address to whitelist.
+ * @param opts           - SDK connection options.
+ */
+export async function addToWhitelist(
+  adminPublicKey: string,
+  address: string,
+  opts: SdkOptions
+): Promise<string> {
+  validateNonEmptyString("adminPublicKey", adminPublicKey);
+  validateNonEmptyString("address", address);
+
+  const contract = getContract(opts);
+  const op = contract.call(
+    "add_to_whitelist",
+    addressToScVal(adminPublicKey),
+    addressToScVal(address)
+  );
+  return invokeMethod("add_to_whitelist", adminPublicKey, op, opts);
+}
+
+/**
+ * Build a transaction to add one address to the blacklist. Only Admin can call this.
+ *
+ * @param adminPublicKey - Admin's address.
+ * @param address        - Address to blacklist.
+ * @param opts           - SDK connection options.
+ */
+export async function addToBlacklist(
+  adminPublicKey: string,
+  address: string,
+  opts: SdkOptions
+): Promise<string> {
+  validateNonEmptyString("adminPublicKey", adminPublicKey);
+  validateNonEmptyString("address", address);
+
+  const contract = getContract(opts);
+  const op = contract.call(
+    "add_to_blacklist",
+    addressToScVal(adminPublicKey),
+    addressToScVal(address)
+  );
+  return invokeMethod("add_to_blacklist", adminPublicKey, op, opts);
+}
+
+/**
+ * Split addresses into contract-sized chunks and build one `bulk_*` transaction per chunk.
+ *
+ * The contract rejects bulk calls over 50 addresses, so larger lists are
+ * submitted as several transactions. Returns the transactions in order.
+ *
+ * @internal
+ */
+async function buildBulkAddressTransactions(
+  method: string,
+  adminPublicKey: string,
+  addresses: string[],
+  opts: SdkOptions
+): Promise<string[]> {
+  validateNonEmptyString("adminPublicKey", adminPublicKey);
+  validateAddressList("addresses", addresses);
+
+  const contract = getContract(opts);
+  const txs: string[] = [];
+  for (let i = 0; i < addresses.length; i += BULK_ADDRESS_CHUNK_SIZE) {
+    const chunk = addresses.slice(i, i + BULK_ADDRESS_CHUNK_SIZE);
+    const op = contract.call(
+      method,
+      addressToScVal(adminPublicKey),
+      vecToScVal(chunk.map(addressToScVal))
+    );
+    txs.push(await invokeMethod(method, adminPublicKey, op, opts));
+  }
+  return txs;
+}
+
+/**
+ * Build transactions to whitelist many addresses (chunked to 50 per transaction).
+ *
+ * @returns One signed-ready XDR per chunk, in submission order.
+ */
+export function bulkAddToWhitelist(
+  adminPublicKey: string,
+  addresses: string[],
+  opts: SdkOptions
+): Promise<string[]> {
+  return buildBulkAddressTransactions("bulk_add_to_whitelist", adminPublicKey, addresses, opts);
+}
+
+/**
+ * Build transactions to remove many addresses from the whitelist (chunked to 50 per transaction).
+ *
+ * @returns One signed-ready XDR per chunk, in submission order.
+ */
+export function bulkRemoveFromWhitelist(
+  adminPublicKey: string,
+  addresses: string[],
+  opts: SdkOptions
+): Promise<string[]> {
+  return buildBulkAddressTransactions("bulk_remove_from_whitelist", adminPublicKey, addresses, opts);
+}
+
+/**
+ * Build transactions to blacklist many addresses (chunked to 50 per transaction).
+ *
+ * @returns One signed-ready XDR per chunk, in submission order.
+ */
+export function bulkAddToBlacklist(
+  adminPublicKey: string,
+  addresses: string[],
+  opts: SdkOptions
+): Promise<string[]> {
+  return buildBulkAddressTransactions("bulk_add_to_blacklist", adminPublicKey, addresses, opts);
+}
+
+/**
+ * Build transactions to remove many addresses from the blacklist (chunked to 50 per transaction).
+ *
+ * @returns One signed-ready XDR per chunk, in submission order.
+ */
+export function bulkRemoveFromBlacklist(
+  adminPublicKey: string,
+  addresses: string[],
+  opts: SdkOptions
+): Promise<string[]> {
+  return buildBulkAddressTransactions("bulk_remove_from_blacklist", adminPublicKey, addresses, opts);
+}
+
+// ---------------------------------------------------------------------------
+// Token Allowlist
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a transaction to add a token to the supported-token allowlist with spending limits.
+ *
+ * @param adminPublicKey - Admin's address.
+ * @param config         - Token address and daily/weekly spending limits.
+ * @param opts           - SDK connection options.
+ */
+export async function addSupportedToken(
+  adminPublicKey: string,
+  config: { token: string; dailyLimit: bigint; weeklyLimit: bigint },
+  opts: SdkOptions
+): Promise<string> {
+  validateNonEmptyString("adminPublicKey", adminPublicKey);
+  validateNonEmptyString("token", config.token);
+  validateNonNegativeBigInt("dailyLimit", config.dailyLimit);
+  validateNonNegativeBigInt("weeklyLimit", config.weeklyLimit);
+
+  const contract = getContract(opts);
+  const op = contract.call(
+    "add_supported_token",
+    addressToScVal(adminPublicKey),
+    addressToScVal(config.token),
+    i128ToScVal(config.dailyLimit),
+    i128ToScVal(config.weeklyLimit)
+  );
+  return invokeMethod("add_supported_token", adminPublicKey, op, opts);
+}
+
+/**
+ * Build a transaction to remove a token from the supported-token allowlist.
+ *
+ * @param adminPublicKey - Admin's address.
+ * @param token          - Token address to remove.
+ * @param opts           - SDK connection options.
+ */
+export async function removeSupportedToken(
+  adminPublicKey: string,
+  token: string,
+  opts: SdkOptions
+): Promise<string> {
+  validateNonEmptyString("adminPublicKey", adminPublicKey);
+  validateNonEmptyString("token", token);
+
+  const contract = getContract(opts);
+  const op = contract.call(
+    "remove_supported_token",
+    addressToScVal(adminPublicKey),
+    addressToScVal(token)
+  );
+  return invokeMethod("remove_supported_token", adminPublicKey, op, opts);
+}
+
+/**
+ * Build a transaction to update the spending limits of a supported token.
+ *
+ * @param adminPublicKey - Admin's address.
+ * @param config         - Token address and new daily/weekly spending limits.
+ * @param opts           - SDK connection options.
+ */
+export async function setTokenLimits(
+  adminPublicKey: string,
+  config: { token: string; dailyLimit: bigint; weeklyLimit: bigint },
+  opts: SdkOptions
+): Promise<string> {
+  validateNonEmptyString("adminPublicKey", adminPublicKey);
+  validateNonEmptyString("token", config.token);
+  validateNonNegativeBigInt("dailyLimit", config.dailyLimit);
+  validateNonNegativeBigInt("weeklyLimit", config.weeklyLimit);
+
+  const contract = getContract(opts);
+  const op = contract.call(
+    "set_token_limits",
+    addressToScVal(adminPublicKey),
+    addressToScVal(config.token),
+    i128ToScVal(config.dailyLimit),
+    i128ToScVal(config.weeklyLimit)
+  );
+  return invokeMethod("set_token_limits", adminPublicKey, op, opts);
+}
+
+/**
+ * Fetch every supported token and its spending limits.
+ *
+ * @param callerPublicKey - Any valid Stellar public key.
+ * @param opts            - SDK connection options.
+ */
+export async function getSupportedTokens(
+  callerPublicKey: string,
+  opts: SdkOptions
+): Promise<TokenSpendingConfig[]> {
+  validateNonEmptyString("callerPublicKey", callerPublicKey);
+
+  const contract = getContract(opts);
+  const op = contract.call("get_supported_tokens");
+  const raw = await simulateReadOnly<Record<string, unknown>[]>(
+    op,
+    opts,
+    callerPublicKey,
+    "getSupportedTokens"
+  );
+  return raw.map((entry) => ({
+    token: entry.token as string,
+    dailyLimit: entry.daily_limit as bigint,
+    weeklyLimit: entry.weekly_limit as bigint,
+    isDefault: entry.is_default as boolean,
+  }));
 }
 
 // ---------------------------------------------------------------------------
