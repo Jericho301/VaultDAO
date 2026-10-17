@@ -10,7 +10,7 @@
  * decodeScVal, parseError) is mocked so each binding's *wiring* can be
  * verified in isolation — the right contract method name, the right
  * argument encoding/order, the right caller key forwarded to
- * buildTransaction. `@stellar/stellar-sdk`'s SorobanRpc.Server/TransactionBuilder are
+ * buildTransaction. `@stellar/stellar-sdk`'s rpc.Server/TransactionBuilder are
  * mocked so the read-only path (simulateReadOnly) can be driven through its
  * success, simulation-error, and no-result branches without a live network.
  */
@@ -113,8 +113,8 @@ vi.mock("@stellar/stellar-sdk", async (importOriginal) => {
 
   return {
     ...actual,
-    SorobanRpc: {
-      ...actual.SorobanRpc,
+    rpc: {
+      ...actual.rpc,
       Server: vi.fn().mockImplementation(function (this: unknown) {
         return serverMock;
       }),

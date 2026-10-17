@@ -522,6 +522,11 @@ export interface SdkOptions {
   contractId: string;
   /** Stellar RPC endpoint URL. */
   rpcUrl: string;
+  /**
+   * Allow plain `http://` RPC URLs. Defaults to `false`, except for localhost
+   * URLs (e.g. a Quickstart node), where it defaults to `true`.
+   */
+  allowHttp?: boolean;
   /** Stellar network passphrase. */
   networkPassphrase: string;
   /**

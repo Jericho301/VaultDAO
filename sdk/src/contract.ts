@@ -9,7 +9,8 @@
  * decodes and returns the on-chain value without requiring a signature.
  */
 
-import { SorobanRpc, xdr } from "@stellar/stellar-sdk";
+import { rpc, xdr } from "@stellar/stellar-sdk";
+import { getRpcServer } from "./rpc";
 import type {
   InitConfig,
   VaultConfig,
@@ -66,7 +67,7 @@ export async function simulateReadOnly<T>(
   method?: string
 ): Promise<T> {
   const log: SdkLogger = opts.logger ?? noopLogger;
-  const server = new SorobanRpc.Server(opts.rpcUrl, { allowHttp: false });
+  const server = getRpcServer(opts);
   const { TransactionBuilder, BASE_FEE } = await import("@stellar/stellar-sdk");
   const ctx = { contractId: opts.contractId, method };
   const simStart = Date.now();
@@ -89,7 +90,7 @@ export async function simulateReadOnly<T>(
     "read-only simulation"
   );
 
-  if (SorobanRpc.Api.isSimulationError(sim)) {
+  if (rpc.Api.isSimulationError(sim)) {
     const durationMs = Date.now() - simStart;
     const err = parseError(new Error(sim.error));
     log.error("Read-only simulation failed", {
@@ -99,7 +100,7 @@ export async function simulateReadOnly<T>(
     });
     throw err;
   }
-  if (!SorobanRpc.Api.isSimulationSuccess(sim) || !sim.result) {
+  if (!rpc.Api.isSimulationSuccess(sim) || !sim.result) {
     const durationMs = Date.now() - simStart;
     log.error("Read-only simulation returned no result", { ...ctx, durationMs });
     throw new Error("Simulation returned no result");
