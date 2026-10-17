@@ -371,6 +371,8 @@ mod test_locked_token_reserve;
 #[cfg(test)]
 mod test_time_weighted_config_validation;
 #[cfg(test)]
+mod test_funding_round_proposal_link;
+#[cfg(test)]
 mod test_execution_recipient_recheck;
 #[cfg(test)]
 mod test_fees;
@@ -15690,6 +15692,7 @@ impl VaultDAO {
         token: Address,
         total_amount: i128,
         milestones: Vec<FundingMilestone>,
+        proposal_id: Option<u64>,
     ) -> Result<u64, VaultError> {
         proposer.require_auth();
 
@@ -15783,12 +15786,24 @@ impl VaultDAO {
             return Err(VaultError::InvalidAmount);
         }
 
+        // Optional link to a proposal: the proposal must exist and be Approved (#1902)
+        let linked_proposal = match proposal_id {
+            Some(pid) => {
+                let proposal = storage::get_proposal(&env, pid)?;
+                if proposal.status != ProposalStatus::Approved {
+                    return Err(VaultError::ProposalNotApproved);
+                }
+                pid
+            }
+            None => 0,
+        };
+
         let milestone_count = milestones.len();
         let round_id = storage::bump_funding_round_id(&env);
 
         let round = FundingRound {
             id: round_id,
-            proposal_id: 0, // not tied to a proposal in this flow
+            proposal_id: linked_proposal,
             recipient: recipient.clone(),
             token: token.clone(),
             total_amount,
@@ -15801,12 +15816,15 @@ impl VaultDAO {
         };
 
         storage::set_funding_round(&env, &round);
+        if let Some(pid) = proposal_id {
+            storage::add_proposal_funding_round(&env, pid, round_id);
+        }
         storage::extend_instance_ttl(&env);
 
         events::emit_funding_round_created(
             &env,
             round_id,
-            0,
+            linked_proposal,
             &recipient,
             &token,
             total_amount,
