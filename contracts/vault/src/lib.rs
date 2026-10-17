@@ -17005,24 +17005,38 @@ impl VaultDAO {
         storage::get_subscriber_index(&env, &subscriber)
     }
 
-    /// Scan all subscriptions up to `next_subscription_id` and expire any that
-    /// are past their grace deadline. Permissionless ? anyone may call this to
-    /// prevent griefing by inaction.
+    /// Scan up to `max_scan` subscription IDs starting at `start_id` and expire
+    /// any Active or Paused subscription that is past its grace deadline.
+    /// Permissionless ? anyone may call this to prevent griefing by inaction.
+    ///
+    /// Pass `start_id = 1` for the first page. Returns `(expired_count, next_cursor)`;
+    /// `next_cursor == 0` means the whole ID range has been scanned. Otherwise call
+    /// again with `start_id = next_cursor` to continue.
     ///
     /// Emits `subscription_expired` for each subscription that transitions to
     /// `SubscriptionStatus::Expired`.
-    pub fn expire_overdue_subscriptions(env: Env, caller: Address) -> u32 {
+    pub fn expire_overdue_subscriptions(
+        env: Env,
+        caller: Address,
+        start_id: u64,
+        max_scan: u32,
+    ) -> Result<(u32, u64), VaultError> {
         caller.require_auth();
+        if max_scan == 0 {
+            return Err(VaultError::InvalidAmount);
+        }
         let current_ledger = env.ledger().sequence() as u64;
         let next_id = storage::get_next_subscription_id(&env);
+        let first = start_id.max(1);
+        let end = first.saturating_add(max_scan as u64).min(next_id);
         let mut expired_count: u32 = 0;
 
-        for id in 1..next_id {
+        for id in first..end {
             let sub = match storage::get_subscription(&env, id) {
                 Ok(s) => s,
                 Err(_) => continue,
             };
-            if sub.status != SubscriptionStatus::Active {
+            if sub.status != SubscriptionStatus::Active && sub.status != SubscriptionStatus::Paused {
                 continue;
             }
             let grace_deadline = sub.next_renewal_ledger + sub.grace_period_ledgers;
@@ -17037,7 +17051,8 @@ impl VaultDAO {
         }
 
         storage::extend_instance_ttl(&env);
-        expired_count
+        let next_cursor = if end >= next_id { 0 } else { end };
+        Ok((expired_count, next_cursor))
     }
 
     /// Reactivate an expired subscription by paying the overdue amount.
