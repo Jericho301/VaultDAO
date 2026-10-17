@@ -445,6 +445,7 @@ mod test_escrow_expiration;
 mod test_escrow_milestone_partial_release;
 #[cfg(test)]
 mod test_escrow_dispute_timeout;
+mod test_escrow_expiry_precedence;
 mod test_escrow_milestone_auth;
 mod test_escrow_multisig_arbitration;
 #[cfg(test)]
@@ -14077,34 +14078,45 @@ impl VaultDAO {
             return Err(VaultError::ConditionsNotMet);
         }
 
-        // Calculate amount to release
-        let amount_to_release = if is_expired {
-            // On expiry, return all unreleased to funder
-            escrow.total_amount - escrow.released_amount
+        // Completed milestones are always payable to the recipient, even after expiry.
+        let recipient_amount = escrow.amount_to_release().max(0);
+
+        // On expiry, only the unreleased remainder for incomplete milestones goes back
+        // to the funder.
+        let refund_amount = if is_expired {
+            (escrow.total_amount - escrow.released_amount - recipient_amount).max(0)
         } else {
-            // Release based on completed milestones
-            escrow.amount_to_release()
+            0
         };
 
+        let amount_to_release = recipient_amount + refund_amount;
         if amount_to_release <= 0 {
             return Err(VaultError::ProposalAlreadyExecuted);
         }
 
-        // Send to recipient if milestones complete, funder if expired
-        let recipient = if is_expired {
-            escrow.funder.clone()
-        } else {
-            escrow.recipient.clone()
-        };
+        if recipient_amount > 0 {
+            token::transfer(&env, &escrow.token, &escrow.recipient, recipient_amount);
+            storage::release_escrow_reserve(&env, &escrow.token, recipient_amount);
+            escrow.released_amount += recipient_amount;
+            events::emit_escrow_released(
+                &env,
+                escrow_id,
+                &escrow.recipient,
+                recipient_amount,
+                false,
+            );
+        }
 
-        token::transfer(&env, &escrow.token, &recipient, amount_to_release);
-        storage::release_escrow_reserve(&env, &escrow.token, amount_to_release);
-
-        escrow.released_amount += amount_to_release;
+        if refund_amount > 0 {
+            token::transfer(&env, &escrow.token, &escrow.funder, refund_amount);
+            storage::release_escrow_reserve(&env, &escrow.token, refund_amount);
+            escrow.released_amount += refund_amount;
+            events::emit_escrow_released(&env, escrow_id, &escrow.funder, refund_amount, true);
+        }
 
         // Update status
         if escrow.released_amount >= escrow.total_amount {
-            escrow.status = if is_expired {
+            escrow.status = if refund_amount > 0 {
                 EscrowStatus::Refunded
             } else {
                 EscrowStatus::Released
@@ -14113,8 +14125,6 @@ impl VaultDAO {
         }
 
         storage::set_escrow(&env, &escrow);
-
-        events::emit_escrow_released(&env, escrow_id, &recipient, amount_to_release, is_expired);
 
         storage::create_audit_entry(&env, AuditAction::EscrowReleased, &caller, escrow_id);
 
