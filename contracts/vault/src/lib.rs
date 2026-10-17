@@ -390,6 +390,8 @@ mod test_stream_create_validation;
 #[cfg(test)]
 mod test_stream_pause_extension;
 #[cfg(test)]
+mod test_recurring_catchup_budget;
+#[cfg(test)]
 mod test_trigger_stream_payment_accrual;
 #[cfg(test)]
 mod test_notification_prefs;
