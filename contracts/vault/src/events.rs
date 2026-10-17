@@ -2546,24 +2546,11 @@ pub fn emit_vesting_cancelled(
 /// Emit when a single phase of a multi-phase proposal execution completes.
 ///
 /// Topics: `("phase_executed", proposal_id)`
-/// Data:   `(phase_index, executor, ledger)`
-// Phase Execution Events
-// ============================================================================
-
-/// Emit when a proposal phase executes successfully.
-///
-/// Topics: `("phase_executed", proposal_id)`
-/// Data:   `(phase_index, status, error_code)`
-pub fn emit_phase_executed(
-    env: &Env,
-    proposal_id: u64,
-    phase_index: u32,
-    executor: &Address,
-    ledger: u64,
-) {
+/// Data:   `(phase_index, executor)`
+pub fn emit_phase_executed(env: &Env, proposal_id: u64, phase_index: u32, executor: &Address) {
     env.events().publish(
         (Symbol::new(env, "phase_executed"), proposal_id),
-        (phase_index, executor.clone(), ledger),
+        (phase_index, executor.clone()),
     );
 }
 
@@ -2571,76 +2558,15 @@ pub fn emit_phase_executed(
 ///
 /// Topics: `("phase_failed", proposal_id)`
 /// Data:   `(phase_index, executor, error_code)`
-    status: u32,
-    error_code: u32,
-) {
-    env.events().publish(
-        (Symbol::new(env, "phase_executed"), proposal_id),
-        (phase_index, status, error_code),
-    );
-}
-
-/// Emit when a proposal phase fails.
-///
-/// Topics: `("phase_failed", proposal_id)`
-/// Data:   `(phase_index, status, error_code)`
 pub fn emit_phase_failed(
     env: &Env,
     proposal_id: u64,
     phase_index: u32,
-    executor: &Address,
-    status: u32,
     error_code: u32,
+    executor: &Address,
 ) {
     env.events().publish(
         (Symbol::new(env, "phase_failed"), proposal_id),
         (phase_index, executor.clone(), error_code),
-        (phase_index, status, error_code),
-    );
-}
-
-// ============================================================================
-// Governed pool and fee withdrawals
-// ============================================================================
-
-/// Emit when a governed withdrawal proposal moves funds out of a vault pool.
-///
-/// Topics: `("pool_withdrawn", pool)` where pool is `ins_withdraw`, `stk_withdraw` or `fee_withdraw`
-/// Data:   `(proposal_id, token, recipient, amount, executor)`
-pub fn emit_pool_withdrawn(
-    env: &Env,
-    pool: &Symbol,
-    proposal_id: u64,
-    token: &Address,
-    recipient: &Address,
-    amount: i128,
-    executor: &Address,
-) {
-    env.events().publish(
-        (Symbol::new(env, "pool_withdrawn"), pool.clone()),
-        (
-            proposal_id,
-            token.clone(),
-            recipient.clone(),
-            amount,
-            executor.clone(),
-        ),
-    );
-}
-
-/// Emit whenever collected fees leave the vault (direct or governed).
-///
-/// Topics: `("fees_withdrawn",)`
-/// Data:   `(token, recipient, amount, admin)`
-pub fn emit_fees_withdrawn(
-    env: &Env,
-    token: &Address,
-    recipient: &Address,
-    amount: i128,
-    admin: &Address,
-) {
-    env.events().publish(
-        (Symbol::new(env, "fees_withdrawn"),),
-        (token.clone(), recipient.clone(), amount, admin.clone()),
     );
 }
