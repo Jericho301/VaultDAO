@@ -584,3 +584,14 @@ export interface StateDiff {
   changes: StateChangeEntry[];
 }
 
+/** Vote a signer can cast on a proposal (mirrors the contract's `VoteChoice`). */
+export type VoteChoice = "Approve" | "Abstain";
+
+/** Delegation of a signer's voting power to another address. */
+export interface VotingDelegation {
+  /** Address receiving the delegated voting power. */
+  delegate: string;
+  /** Ledger sequence after which the delegation expires. */
+  expiryLedger: bigint;
+}
+

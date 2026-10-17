@@ -23,6 +23,8 @@ import type {
   VaultMetrics,
   Reputation,
   AuditEntry,
+  VoteChoice,
+  VotingDelegation,
 } from "./types";
 import { Role, ProposalStatus, VaultError, VaultErrorCode, noopLogger } from "./types";
 import type { SdkLogger } from "./types";
@@ -37,6 +39,8 @@ import {
   decodeScVal,
   parseError,
   retryOnRateLimit,
+  enumToScVal,
+  vecToScVal,
 } from "./utils";
 import {
   validateNonEmptyString,
@@ -325,6 +329,251 @@ export async function rejectProposal(
     u64ToScVal(proposalId)
   );
   return buildTransaction(rejectorPublicKey, op, opts);
+}
+
+// ---------------------------------------------------------------------------
+// Voting Lifecycle
+// ---------------------------------------------------------------------------
+
+/**
+ * Build a transaction for a signer to abstain on a proposal.
+ *
+ * @param signerPublicKey - Signer's address (must be in the signers list).
+ * @param proposalId      - ID of the proposal.
+ * @param opts            - SDK connection options.
+ */
+export async function abstainProposal(
+  signerPublicKey: string,
+  proposalId: bigint,
+  opts: SdkOptions
+): Promise<string> {
+  validateNonEmptyString("signerPublicKey", signerPublicKey);
+  validateId("proposalId", proposalId);
+
+  const contract = getContract(opts);
+  const op = contract.call(
+    "abstain_proposal",
+    addressToScVal(signerPublicKey),
+    u64ToScVal(proposalId)
+  );
+  return invokeMethod("abstain_proposal", signerPublicKey, op, opts);
+}
+
+/**
+ * Build a transaction for a signer to change a vote they already cast.
+ *
+ * @param signerPublicKey - Signer's address.
+ * @param proposalId      - ID of the proposal.
+ * @param choice          - The new vote (`"Approve"` or `"Abstain"`).
+ * @param opts            - SDK connection options.
+ */
+export async function changeVote(
+  signerPublicKey: string,
+  proposalId: bigint,
+  choice: VoteChoice,
+  opts: SdkOptions
+): Promise<string> {
+  validateNonEmptyString("signerPublicKey", signerPublicKey);
+  validateId("proposalId", proposalId);
+
+  const contract = getContract(opts);
+  const op = contract.call(
+    "change_vote",
+    addressToScVal(signerPublicKey),
+    u64ToScVal(proposalId),
+    enumToScVal(choice)
+  );
+  return invokeMethod("change_vote", signerPublicKey, op, opts);
+}
+
+/**
+ * Build a transaction for a signer to veto a proposal.
+ *
+ * @param vetoerPublicKey - Address holding veto rights.
+ * @param proposalId      - ID of the proposal to veto.
+ * @param opts            - SDK connection options.
+ */
+export async function vetoProposal(
+  vetoerPublicKey: string,
+  proposalId: bigint,
+  opts: SdkOptions
+): Promise<string> {
+  validateNonEmptyString("vetoerPublicKey", vetoerPublicKey);
+  validateId("proposalId", proposalId);
+
+  const contract = getContract(opts);
+  const op = contract.call(
+    "veto_proposal",
+    addressToScVal(vetoerPublicKey),
+    u64ToScVal(proposalId)
+  );
+  return invokeMethod("veto_proposal", vetoerPublicKey, op, opts);
+}
+
+/**
+ * Build a transaction to cancel a proposal.
+ *
+ * @param cancellerPublicKey - Proposer or Admin.
+ * @param proposalId         - ID of the proposal to cancel.
+ * @param reason             - Short reason recorded on-chain (max 32 chars).
+ * @param opts               - SDK connection options.
+ */
+export async function cancelProposal(
+  cancellerPublicKey: string,
+  proposalId: bigint,
+  reason: string,
+  opts: SdkOptions
+): Promise<string> {
+  validateNonEmptyString("cancellerPublicKey", cancellerPublicKey);
+  validateId("proposalId", proposalId);
+  validateMemo("reason", reason);
+
+  const contract = getContract(opts);
+  const op = contract.call(
+    "cancel_proposal",
+    addressToScVal(cancellerPublicKey),
+    u64ToScVal(proposalId),
+    symbolToScVal(reason)
+  );
+  return invokeMethod("cancel_proposal", cancellerPublicKey, op, opts);
+}
+
+/**
+ * Build a transaction to amend the recipient, amount, and memo of a pending proposal.
+ *
+ * @param proposerPublicKey - Original proposer's address.
+ * @param proposalId        - ID of the proposal to amend.
+ * @param amendment         - New recipient, amount, memo, and reason for the change.
+ * @param opts              - SDK connection options.
+ */
+export async function amendProposal(
+  proposerPublicKey: string,
+  proposalId: bigint,
+  amendment: {
+    recipient: string;
+    amount: bigint;
+    memo: string;
+    reason: string;
+  },
+  opts: SdkOptions
+): Promise<string> {
+  validateNonEmptyString("proposerPublicKey", proposerPublicKey);
+  validateId("proposalId", proposalId);
+  validateNonEmptyString("recipient", amendment.recipient);
+  validatePositiveBigInt("amount", amendment.amount);
+  validateMemo("memo", amendment.memo);
+  validateMemo("reason", amendment.reason);
+
+  const contract = getContract(opts);
+  const op = contract.call(
+    "amend_proposal",
+    addressToScVal(proposerPublicKey),
+    u64ToScVal(proposalId),
+    addressToScVal(amendment.recipient),
+    i128ToScVal(amendment.amount),
+    symbolToScVal(amendment.memo),
+    symbolToScVal(amendment.reason)
+  );
+  return invokeMethod("amend_proposal", proposerPublicKey, op, opts);
+}
+
+/**
+ * Build a transaction that supersedes an existing proposal with a new transfer.
+ *
+ * The old proposal is replaced in a single contract call. Defaults to
+ * `Normal` priority, no conditions (AND logic), and no insurance.
+ *
+ * @param proposerPublicKey - Original proposer's address.
+ * @param oldProposalId     - ID of the proposal being superseded.
+ * @param transfer          - Replacement recipient, token, amount, and memo.
+ * @param options           - Optional priority and insurance amount.
+ * @param opts              - SDK connection options.
+ */
+export async function supersedeProposal(
+  proposerPublicKey: string,
+  oldProposalId: bigint,
+  transfer: {
+    recipient: string;
+    tokenAddress: string;
+    amount: bigint;
+    memo: string;
+  },
+  options: {
+    priority?: "Low" | "Normal" | "High" | "Critical";
+    insuranceAmount?: bigint;
+  },
+  opts: SdkOptions
+): Promise<string> {
+  validateNonEmptyString("proposerPublicKey", proposerPublicKey);
+  validateId("oldProposalId", oldProposalId);
+  validateNonEmptyString("recipient", transfer.recipient);
+  validateNonEmptyString("tokenAddress", transfer.tokenAddress);
+  validatePositiveBigInt("amount", transfer.amount);
+  validateMemo("memo", transfer.memo);
+  const insuranceAmount = options.insuranceAmount ?? 0n;
+  validateNonNegativeBigInt("insuranceAmount", insuranceAmount);
+
+  const contract = getContract(opts);
+  const op = contract.call(
+    "supersede_proposal",
+    addressToScVal(proposerPublicKey),
+    u64ToScVal(oldProposalId),
+    addressToScVal(transfer.recipient),
+    addressToScVal(transfer.tokenAddress),
+    i128ToScVal(transfer.amount),
+    symbolToScVal(transfer.memo),
+    enumToScVal(options.priority ?? "Normal"),
+    vecToScVal([]),
+    enumToScVal("And"),
+    i128ToScVal(insuranceAmount)
+  );
+  return invokeMethod("supersede_proposal", proposerPublicKey, op, opts);
+}
+
+/**
+ * Build a transaction to delegate a signer's voting power to another address.
+ *
+ * @param delegatorPublicKey - Address delegating its voting power.
+ * @param delegation         - Delegate address and expiry ledger.
+ * @param opts               - SDK connection options.
+ */
+export async function delegateVotingPower(
+  delegatorPublicKey: string,
+  delegation: VotingDelegation,
+  opts: SdkOptions
+): Promise<string> {
+  validateNonEmptyString("delegatorPublicKey", delegatorPublicKey);
+  validateNonEmptyString("delegate", delegation.delegate);
+  validateNonNegativeBigInt("expiryLedger", delegation.expiryLedger);
+
+  const contract = getContract(opts);
+  const op = contract.call(
+    "delegate_voting_power",
+    addressToScVal(delegatorPublicKey),
+    addressToScVal(delegation.delegate),
+    u64ToScVal(delegation.expiryLedger)
+  );
+  return invokeMethod("delegate_voting_power", delegatorPublicKey, op, opts);
+}
+
+/**
+ * Build a transaction to revoke an active voting-power delegation.
+ *
+ * @param delegatorPublicKey - Address that previously delegated its voting power.
+ * @param opts               - SDK connection options.
+ */
+export async function revokeDelegation(
+  delegatorPublicKey: string,
+  opts: SdkOptions
+): Promise<string> {
+  validateNonEmptyString("delegatorPublicKey", delegatorPublicKey);
+
+  const contract = getContract(opts);
+  const op = contract.call(
+    "revoke_delegation",
+    addressToScVal(delegatorPublicKey)
+  );
+  return invokeMethod("revoke_delegation", delegatorPublicKey, op, opts);
 }
 
 // ---------------------------------------------------------------------------

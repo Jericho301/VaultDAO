@@ -34,6 +34,8 @@ export type {
   StateDiff,
   StateChangeValue,
   StateChangeEntry,
+  VoteChoice,
+  VotingDelegation,
 } from "./types";
 
 // Enums & errors
@@ -135,6 +137,15 @@ export {
   getRole,
   getTodaySpent,
   isSigner,
+  // Voting lifecycle
+  abstainProposal,
+  changeVote,
+  vetoProposal,
+  cancelProposal,
+  amendProposal,
+  supersedeProposal,
+  delegateVotingPower,
+  revokeDelegation,
 } from "./contract";
 
 // Token flows: vesting, token locks, escrow, funding rounds

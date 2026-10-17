@@ -58,6 +58,14 @@ import {
   getRole,
   getTodaySpent,
   isSigner,
+  abstainProposal,
+  changeVote,
+  vetoProposal,
+  cancelProposal,
+  amendProposal,
+  supersedeProposal,
+  delegateVotingPower,
+  revokeDelegation,
 } from "./contract";
 import {
   getContract,
@@ -67,6 +75,8 @@ import {
   u64ToScVal,
   u32ToScVal,
   symbolToScVal,
+  enumToScVal,
+  vecToScVal,
   decodeScVal,
   parseError,
 } from "./utils";
@@ -92,6 +102,8 @@ vi.mock("./utils", () => ({
   u64ToScVal: vi.fn((v: unknown) => `u64:${v}`),
   u32ToScVal: vi.fn((v: unknown) => `u32:${v}`),
   symbolToScVal: vi.fn((v: unknown) => `sym:${v}`),
+  enumToScVal: vi.fn((v: unknown) => `enum:${v}`),
+  vecToScVal: vi.fn((v: unknown[]) => `vec:${v.length}`),
   decodeScVal: vi.fn(),
   parseError: vi.fn((e: unknown) => e),
   retryOnRateLimit: vi.fn(async (fn: () => Promise<unknown>) => fn()),
@@ -250,6 +262,159 @@ describe("contract.ts bindings", () => {
         "addr:GREJ",
         "u64:7",
       );
+    });
+  });
+
+  describe("Voting Lifecycle", () => {
+    it("abstainProposal encodes signer and proposal id", async () => {
+      const xdr = await abstainProposal("GSIGNER", 7n, opts);
+      expect(xdr).toBe("FAKE_TX_XDR");
+      expect(contractCallSpy).toHaveBeenCalledWith(
+        "abstain_proposal",
+        "addr:GSIGNER",
+        "u64:7",
+      );
+      expect(buildTransaction).toHaveBeenCalledWith(
+        "GSIGNER",
+        expect.anything(),
+        opts,
+      );
+    });
+
+    it("changeVote encodes the new choice as an enum", async () => {
+      await changeVote("GSIGNER", 7n, "Abstain", opts);
+      expect(contractCallSpy).toHaveBeenCalledWith(
+        "change_vote",
+        "addr:GSIGNER",
+        "u64:7",
+        "enum:Abstain",
+      );
+    });
+
+    it("vetoProposal encodes vetoer and proposal id", async () => {
+      await vetoProposal("GVETO", 7n, opts);
+      expect(contractCallSpy).toHaveBeenCalledWith(
+        "veto_proposal",
+        "addr:GVETO",
+        "u64:7",
+      );
+    });
+
+    it("cancelProposal encodes canceller, id, and reason symbol", async () => {
+      await cancelProposal("GCANCEL", 7n, "changed_mind", opts);
+      expect(contractCallSpy).toHaveBeenCalledWith(
+        "cancel_proposal",
+        "addr:GCANCEL",
+        "u64:7",
+        "sym:changed_mind",
+      );
+    });
+
+    it("amendProposal encodes the replacement recipient, amount, memo, and reason", async () => {
+      await amendProposal(
+        "GPROP",
+        7n,
+        { recipient: "GNEW", amount: 250n, memo: "fixed", reason: "typo" },
+        opts,
+      );
+      expect(contractCallSpy).toHaveBeenCalledWith(
+        "amend_proposal",
+        "addr:GPROP",
+        "u64:7",
+        "addr:GNEW",
+        "i128:250",
+        "sym:fixed",
+        "sym:typo",
+      );
+    });
+
+    it("supersedeProposal defaults to Normal priority, no conditions, AND logic, no insurance", async () => {
+      await supersedeProposal(
+        "GPROP",
+        7n,
+        { recipient: "GRECIP", tokenAddress: "CTOKEN", amount: 100n, memo: "redo" },
+        {},
+        opts,
+      );
+      expect(contractCallSpy).toHaveBeenCalledWith(
+        "supersede_proposal",
+        "addr:GPROP",
+        "u64:7",
+        "addr:GRECIP",
+        "addr:CTOKEN",
+        "i128:100",
+        "sym:redo",
+        "enum:Normal",
+        "vec:0",
+        "enum:And",
+        "i128:0",
+      );
+    });
+
+    it("supersedeProposal forwards an explicit priority and insurance amount", async () => {
+      await supersedeProposal(
+        "GPROP",
+        7n,
+        { recipient: "GRECIP", tokenAddress: "CTOKEN", amount: 100n, memo: "redo" },
+        { priority: "Critical", insuranceAmount: 50n },
+        opts,
+      );
+      expect(contractCallSpy).toHaveBeenCalledWith(
+        "supersede_proposal",
+        "addr:GPROP",
+        "u64:7",
+        "addr:GRECIP",
+        "addr:CTOKEN",
+        "i128:100",
+        "sym:redo",
+        "enum:Critical",
+        "vec:0",
+        "enum:And",
+        "i128:50",
+      );
+    });
+
+    it("delegateVotingPower encodes delegator, delegate, and expiry ledger", async () => {
+      await delegateVotingPower(
+        "GDELEG",
+        { delegate: "GDEST", expiryLedger: 900n },
+        opts,
+      );
+      expect(contractCallSpy).toHaveBeenCalledWith(
+        "delegate_voting_power",
+        "addr:GDELEG",
+        "addr:GDEST",
+        "u64:900",
+      );
+    });
+
+    it("revokeDelegation encodes the delegator", async () => {
+      await revokeDelegation("GDELEG", opts);
+      expect(contractCallSpy).toHaveBeenCalledWith(
+        "revoke_delegation",
+        "addr:GDELEG",
+      );
+    });
+
+    it("rejects invalid inputs before building a transaction", async () => {
+      await expect(changeVote("GSIGNER", 0n, "Approve", opts)).rejects.toThrow();
+      await expect(abstainProposal("", 7n, opts)).rejects.toThrow();
+      await expect(
+        amendProposal(
+          "GPROP",
+          7n,
+          { recipient: "GNEW", amount: 0n, memo: "fixed", reason: "typo" },
+          opts,
+        ),
+      ).rejects.toThrow();
+      await expect(
+        delegateVotingPower(
+          "GDELEG",
+          { delegate: "GDEST", expiryLedger: -1n },
+          opts,
+        ),
+      ).rejects.toThrow();
+      expect(buildTransaction).not.toHaveBeenCalled();
     });
   });
 
