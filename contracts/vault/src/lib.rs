@@ -480,6 +480,8 @@ mod test_recovery_role_revocation;
 #[cfg(test)]
 mod test_recovery_expiry;
 #[cfg(test)]
+mod test_recovery_competing;
+#[cfg(test)]
 mod test_recurring;
 #[cfg(test)]
 mod test_reentrancy;
@@ -14549,6 +14551,15 @@ impl VaultDAO {
             return Err(VaultError::ThresholdTooHigh);
         }
 
+        // Issue #1934: refuse to open a second recovery while one is still live.
+        if let Some(active_id) = storage::get_active_recovery_id(&env) {
+            if let Ok(active) = storage::get_recovery_proposal(&env, active_id) {
+                if Self::recovery_is_open(&env, &active) {
+                    return Err(VaultError::RecoveryAlreadyActive);
+                }
+            }
+        }
+
         let id = storage::increment_recovery_id(&env);
         let current_ledger = env.ledger().sequence() as u64;
 
@@ -14572,6 +14583,7 @@ impl VaultDAO {
         };
 
         storage::set_recovery_proposal(&env, &proposal);
+        storage::set_active_recovery_id(&env, id);
         events::emit_recovery_proposed(&env, id, new_threshold);
 
         Ok(id)
@@ -14869,6 +14881,7 @@ impl VaultDAO {
 
         proposal.status = RecoveryStatus::Executed;
         storage::set_recovery_proposal(&env, &proposal);
+        Self::cancel_competing_recoveries(&env, proposal_id);
 
         events::emit_recovery_executed(&env, proposal_id);
         if !invalidated_ids.is_empty() {
@@ -14954,6 +14967,36 @@ impl VaultDAO {
     /// Whether a recovery proposal is past its expiry ledger (Issue #1933).
     fn recovery_is_expired(env: &Env, proposal: &RecoveryProposal) -> bool {
         env.ledger().sequence() as u64 > proposal.expires_at
+    }
+
+    /// Whether a recovery proposal can still be approved or executed.
+    /// Expired proposals are not open, so they do not block a new recovery.
+    fn recovery_is_open(env: &Env, proposal: &RecoveryProposal) -> bool {
+        (proposal.status == RecoveryStatus::Pending
+            || proposal.status == RecoveryStatus::Approved)
+            && !Self::recovery_is_expired(env, proposal)
+    }
+
+    /// Cancel every other open recovery once one has executed (Issue #1934).
+    ///
+    /// Competing proposals carry their own signer lists and thresholds, so a
+    /// stale one must not be approvable or executable after a newer recovery
+    /// has replaced the signer set.
+    fn cancel_competing_recoveries(env: &Env, executed_id: u64) {
+        for id in 1..storage::get_next_recovery_id(env) {
+            if id == executed_id {
+                continue;
+            }
+            if let Ok(mut other) = storage::get_recovery_proposal(env, id) {
+                if other.status == RecoveryStatus::Pending
+                    || other.status == RecoveryStatus::Approved
+                {
+                    other.status = RecoveryStatus::Cancelled;
+                    storage::set_recovery_proposal(env, &other);
+                    events::emit_recovery_cancelled(env, id, &env.current_contract_address());
+                }
+            }
+        }
     }
 
     /// Get recovery config change proposal details (Issue #1702)
