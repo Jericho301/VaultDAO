@@ -2,8 +2,8 @@
 //!
 //! Standardized events for proposal lifecycle and admin actions.
 
-use crate::types::{ProposalAmendment, SignerTier};
-use soroban_sdk::{Address, Env, Symbol, Vec};
+use crate::types::{FundingRoundConfig, ProposalAmendment, SignerTier};
+use soroban_sdk::{Address, Env, String, Symbol, Vec};
 
 /// Emit when contract is initialized
 pub fn emit_initialized(env: &Env, admin: &Address, threshold: u32) {
@@ -2596,4 +2596,126 @@ pub fn emit_phase_failed(
         (Symbol::new(env, "phase_failed"), proposal_id),
         (phase_index, executor.clone(), error_code),
     );
+}
+
+// ============================================================================
+// Issue #1940: state changes that previously emitted no event
+// ============================================================================
+
+/// Emit when an attachment is added to a proposal.
+///
+/// Topics: `("attachment_added", proposal_id)`
+/// Data:   `(actor, attachment)`
+pub fn emit_attachment_added(env: &Env, proposal_id: u64, actor: &Address, attachment: &String) {
+    env.events().publish(
+        (Symbol::new(env, "attachment_added"), proposal_id),
+        (actor.clone(), attachment.clone()),
+    );
+}
+
+/// Emit when an attachment is removed from a proposal.
+///
+/// Topics: `("attachment_removed", proposal_id)`
+/// Data:   `(actor, cid)`
+pub fn emit_attachment_removed(env: &Env, proposal_id: u64, actor: &Address, cid: &String) {
+    env.events().publish(
+        (Symbol::new(env, "attachment_removed"), proposal_id),
+        (actor.clone(), cid.clone()),
+    );
+}
+
+/// Emit when a metadata key is set on a proposal.
+///
+/// Topics: `("metadata_set", proposal_id)`
+/// Data:   `(actor, key)`
+pub fn emit_proposal_metadata_set(env: &Env, proposal_id: u64, actor: &Address, key: &Symbol) {
+    env.events().publish(
+        (Symbol::new(env, "metadata_set"), proposal_id),
+        (actor.clone(), key.clone()),
+    );
+}
+
+/// Emit when a metadata key is removed from a proposal.
+///
+/// Topics: `("metadata_removed", proposal_id)`
+/// Data:   `(actor, key)`
+pub fn emit_proposal_metadata_removed(env: &Env, proposal_id: u64, actor: &Address, key: &Symbol) {
+    env.events().publish(
+        (Symbol::new(env, "metadata_removed"), proposal_id),
+        (actor.clone(), key.clone()),
+    );
+}
+
+/// Emit when an audit checkpoint is created over a range of audit entries.
+///
+/// Topics: `("audit_checkpoint", checkpoint_id)`
+/// Data:   `(admin, from_entry_id, to_entry_id)`
+pub fn emit_audit_checkpoint_created(
+    env: &Env,
+    checkpoint_id: u64,
+    admin: &Address,
+    from_entry_id: u64,
+    to_entry_id: u64,
+) {
+    env.events().publish(
+        (Symbol::new(env, "audit_checkpoint"), checkpoint_id),
+        (admin.clone(), from_entry_id, to_entry_id),
+    );
+}
+
+/// Emit when the whitelist mode is turned on or off.
+///
+/// Topics: `("whitelist_mode",)`
+/// Data:   `(admin, enabled)`
+pub fn emit_whitelist_mode_changed(env: &Env, admin: &Address, enabled: bool) {
+    env.events().publish(
+        (Symbol::new(env, "whitelist_mode"),),
+        (admin.clone(), enabled),
+    );
+}
+
+/// Emit when the funding round configuration is replaced.
+///
+/// Topics: `("funding_cfg_updated",)`
+/// Data:   `(signer, config)`
+pub fn emit_funding_round_config_updated(
+    env: &Env,
+    signer: &Address,
+    config: &FundingRoundConfig,
+) {
+    env.events().publish(
+        (Symbol::new(env, "funding_cfg_updated"),),
+        (signer.clone(), config.clone()),
+    );
+}
+
+/// Emit when auto-complete is enabled or disabled for a stream.
+///
+/// Topics: `("stream_auto_complete", stream_id)`
+/// Data:   `(actor, enabled)`
+pub fn emit_stream_auto_complete_set(env: &Env, stream_id: u64, actor: &Address, enabled: bool) {
+    env.events().publish(
+        (Symbol::new(env, "stream_auto_complete"), stream_id),
+        (actor.clone(), enabled),
+    );
+}
+
+/// Emit when a batch of proposals is created.
+///
+/// Topics: `("batch_created", batch_id)`
+/// Data:   `(creator, proposal_ids)`
+pub fn emit_batch_created(env: &Env, batch_id: u64, creator: &Address, proposal_ids: &Vec<u64>) {
+    env.events().publish(
+        (Symbol::new(env, "batch_created"), batch_id),
+        (creator.clone(), proposal_ids.clone()),
+    );
+}
+
+/// Emit when the gas price oracle configuration is cleared.
+///
+/// Topics: `("gas_oracle_cleared",)`
+/// Data:   `admin`
+pub fn emit_gas_oracle_cleared(env: &Env, admin: &Address) {
+    env.events()
+        .publish((Symbol::new(env, "gas_oracle_cleared"),), admin.clone());
 }

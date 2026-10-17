@@ -356,6 +356,8 @@ mod test_attachments;
 #[cfg(test)]
 mod test_audit;
 #[cfg(test)]
+mod test_event_coverage;
+#[cfg(test)]
 mod test_batch_dependencies;
 #[cfg(test)]
 mod test_cache_invalidation;
@@ -2902,6 +2904,7 @@ impl VaultDAO {
         }
 
         let batch_id = storage::increment_batch_id(&env);
+        events::emit_batch_created(&env, batch_id, &creator, &proposal_ids);
         let batch = types::BatchTransaction {
             id: batch_id,
             proposal_ids,
@@ -7799,6 +7802,7 @@ impl VaultDAO {
 
         storage::set_stream_auto_complete(&env, stream_id, enabled);
         storage::extend_instance_ttl(&env);
+        events::emit_stream_auto_complete_set(&env, stream_id, &caller, enabled);
         Ok(())
     }
 
@@ -8956,6 +8960,7 @@ impl VaultDAO {
         }
 
         storage::extend_instance_ttl(&env);
+        events::emit_audit_checkpoint_created(&env, checkpoint_id, &admin, from_entry_id, to_entry_id);
         Ok(checkpoint_id)
     }
 
@@ -9485,6 +9490,7 @@ impl VaultDAO {
         if attachments.contains(attachment.clone()) {
             return Err(VaultError::AttachmentAlreadyExists);
         }
+        events::emit_attachment_added(&env, proposal_id, &caller, &attachment);
         attachments.push_back(attachment);
         storage::set_attachments(&env, proposal_id, &attachments);
         storage::extend_instance_ttl(&env);
@@ -9527,6 +9533,7 @@ impl VaultDAO {
         storage::set_attachments(&env, proposal_id, &attachments);
         storage::extend_instance_ttl(&env);
 
+        events::emit_attachment_removed(&env, proposal_id, &caller, &cid);
         Ok(())
     }
 
@@ -9579,6 +9586,7 @@ impl VaultDAO {
             return Err(VaultError::ExceedsProposalLimit);
         }
 
+        events::emit_proposal_metadata_set(&env, proposal_id, &caller, &key);
         proposal.metadata.set(key, value);
         storage::set_proposal(&env, &proposal);
         storage::extend_instance_ttl(&env);
@@ -9609,6 +9617,7 @@ impl VaultDAO {
             return Err(VaultError::ProposalNotPending);
         }
 
+        events::emit_proposal_metadata_removed(&env, proposal_id, &caller, &key);
         proposal.metadata.remove(key);
         storage::set_proposal(&env, &proposal);
         storage::extend_instance_ttl(&env);
@@ -10212,6 +10221,7 @@ impl VaultDAO {
 
         storage::clear_gas_price_oracle_config(&env);
         storage::extend_instance_ttl(&env);
+        events::emit_gas_oracle_cleared(&env, &admin);
         Ok(())
     }
 
@@ -13651,6 +13661,7 @@ impl VaultDAO {
         storage::set_template(&env, &template);
         storage::extend_instance_ttl(&env);
 
+        events::emit_template_status_changed(&env, template_id, &template.name, is_active, &admin);
         Ok(())
     }
 
@@ -16237,6 +16248,7 @@ impl VaultDAO {
         }
 
         storage::set_funding_round_config(&env, &config);
+        events::emit_funding_round_config_updated(&env, &signer, &config);
         Ok(())
     }
 
@@ -18134,6 +18146,7 @@ impl VaultDAO {
         config.whitelist_mode = enabled;
         storage::set_config(&env, &config);
         storage::extend_instance_ttl(&env);
+        events::emit_whitelist_mode_changed(&env, &admin, enabled);
         Ok(())
     }
 
