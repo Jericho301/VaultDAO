@@ -294,3 +294,54 @@ fn test_swap_with_unmet_price_condition_does_not_execute() {
     );
 }
 
+// ============================================================================
+// #1928: swap insurance is collected, not just recorded
+// ============================================================================
+
+#[test]
+fn test_propose_swap_collects_insurance() {
+    let env = Env::default();
+    let ctx = setup(&env);
+    let token_in = env
+        .register_stellar_asset_contract_v2(Address::generate(&env))
+        .address();
+    let token_out = Address::generate(&env);
+    ctx.client.add_supported_token(&ctx.admin, &token_in, &1_000_000, &1_000_000);
+    ctx.client.add_supported_token(&ctx.admin, &token_out, &1_000_000, &1_000_000);
+    ctx.client.set_insurance_config(
+        &ctx.admin,
+        &InsuranceConfig {
+            enabled: true,
+            min_amount: 1_000,
+            min_insurance_bps: 1_000, // 10%
+            slash_percentage: 50,
+        },
+    );
+    StellarAssetClient::new(&env, &token_in).mint(&ctx.treasurer, &1_000);
+
+    // A 2_000 swap needs at least 200 of insurance
+    let short = ctx.client.try_propose_swap(
+        &ctx.treasurer,
+        &swap_op(&ctx, &token_in, &token_out, 2_000),
+        &Priority::Normal,
+        &Vec::new(&env),
+        &ConditionLogic::And,
+        &100i128,
+    );
+    assert_eq!(short, Err(Ok(VaultError::InsuranceInsufficient)));
+
+    let proposal_id = ctx.client.propose_swap(
+        &ctx.treasurer,
+        &swap_op(&ctx, &token_in, &token_out, 2_000),
+        &Priority::Normal,
+        &Vec::new(&env),
+        &ConditionLogic::And,
+        &200i128,
+    );
+
+    let proposal = ctx.client.get_proposal(&proposal_id);
+    assert_eq!(proposal.insurance_amount, 200);
+    let token_client = TokenClient::new(&env, &token_in);
+    assert_eq!(token_client.balance(&ctx.contract_id), 200);
+    assert_eq!(token_client.balance(&ctx.treasurer), 800);
+}

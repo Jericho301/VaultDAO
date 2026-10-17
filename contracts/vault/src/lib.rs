@@ -12416,6 +12416,23 @@ impl VaultDAO {
             Self::reserve_outflow_limits(&env, &config, &proposer, &spend_token, spend_amount)?;
         }
 
+        // Collect insurance the way propose_transfer_internal does, so that the refund on
+        // execute and the slash on reject or cancel act on funds the vault really holds (#1928).
+        let insurance_config = storage::get_insurance_config(&env);
+        let actual_insurance = insurance_amount.max(0);
+        if insurance_config.enabled && spend_amount >= insurance_config.min_amount {
+            let mut min_required = spend_amount * insurance_config.min_insurance_bps as i128 / 10_000;
+            if storage::get_reputation(&env, &proposer).score >= 750 {
+                min_required /= 2;
+            }
+            if actual_insurance < min_required {
+                return Err(VaultError::InsuranceInsufficient);
+            }
+        }
+        if actual_insurance > 0 {
+            token::transfer_to_vault(&env, &spend_token, &proposer, actual_insurance);
+        }
+
         let current_ledger = env.ledger().sequence() as u64;
         let unlock_ledger = if spend_amount > 0 && spend_amount >= config.timelock_threshold {
             current_ledger + config.timelock_delay
@@ -12445,7 +12462,7 @@ impl VaultDAO {
             unlock_ledger,
             execution_time: None,
             execution_window_ledgers: 0,
-            insurance_amount,
+            insurance_amount: actual_insurance,
             stake_amount: 0,
             gas_limit: 0,
             gas_used: 0,
@@ -12643,6 +12660,21 @@ impl VaultDAO {
             proposal.gas_used,
             current_ledger,
         );
+        // Return insurance on success, as execute_proposal does (#1928)
+        if proposal.insurance_amount > 0 {
+            token::transfer(
+                &env,
+                &proposal.token,
+                &proposal.proposer,
+                proposal.insurance_amount,
+            );
+            events::emit_insurance_returned(
+                &env,
+                proposal_id,
+                &proposal.proposer,
+                proposal.insurance_amount,
+            );
+        }
         Self::update_reputation_on_execution(&env, &proposal);
         let execution_time = current_ledger.saturating_sub(proposal.created_at);
         storage::metrics_on_execution(&env, proposal.gas_used, execution_time);
@@ -17017,7 +17049,6 @@ impl VaultDAO {
         // First payment goes straight from subscriber to provider. Staging it in the
         // vault gained nothing and left the vault as an intermediate custodian.
         token::transfer_from_holder(&env, &token, &subscriber, &provider, amount_per_period);
-
 
         let current_ledger = env.ledger().sequence() as u64;
         let id = storage::increment_subscription_id(&env);
