@@ -18435,7 +18435,13 @@ impl VaultDAO {
         start_ledger: u32,
         end_ledger: u32,
     ) -> Result<u64, VaultError> {
-        Self::validate_vesting_params(total, cliff_ledger, start_ledger, end_ledger)?;
+        Self::validate_vesting_params(
+            total,
+            cliff_ledger,
+            start_ledger,
+            end_ledger,
+            env.ledger().sequence(),
+        )?;
 
         let mut phases = Vec::new(&env);
         phases.push_back(ProposalPhase {
@@ -18458,13 +18464,23 @@ impl VaultDAO {
         cliff_ledger: u32,
         start_ledger: u32,
         end_ledger: u32,
+        current_ledger: u32,
     ) -> Result<(), VaultError> {
+        // Maximum vesting duration (~2 years at ~5s/ledger) so schedules
+        // cannot outlive any realistic storage TTL.
+        const MAX_VESTING_DURATION_LEDGERS: u32 = 12_614_400;
         if total <= 0
             || end_ledger <= cliff_ledger
             || end_ledger <= start_ledger
             || cliff_ledger < start_ledger
         {
             return Err(VaultError::InvalidAmount);
+        }
+        if start_ledger < current_ledger {
+            return Err(VaultError::InvalidDeadline);
+        }
+        if end_ledger.saturating_sub(start_ledger) > MAX_VESTING_DURATION_LEDGERS {
+            return Err(VaultError::InvalidDeadline);
         }
         Ok(())
     }
@@ -18483,7 +18499,13 @@ impl VaultDAO {
         start_ledger: u32,
         end_ledger: u32,
     ) -> Result<u64, VaultError> {
-        Self::validate_vesting_params(total, cliff_ledger, start_ledger, end_ledger)?;
+        Self::validate_vesting_params(
+            total,
+            cliff_ledger,
+            start_ledger,
+            end_ledger,
+            env.ledger().sequence(),
+        )?;
         let active = storage::get_active_vesting_count(env);
         if active >= 100 {
             return Err(VaultError::VestingCapReached);
