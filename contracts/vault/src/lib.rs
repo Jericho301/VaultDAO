@@ -18079,6 +18079,66 @@ impl VaultDAO {
             return Err(VaultError::ProposalNotApproved);
         }
 
+        let current_ledger = env.ledger().sequence() as u64;
+        if storage::is_proposal_in_progress(&env, proposal_id) {
+            return Err(VaultError::ProposalNotApproved);
+        }
+        if current_ledger > base.expires_at {
+            base.status = ProposalStatus::Expired;
+            storage::set_proposal(&env, &base);
+            storage::pending_expiry_index_remove(&env, proposal_id);
+            return Err(VaultError::PermissionExpired);
+        }
+        let config = storage::get_config(&env)?;
+        if config.exec_window_ledgers > 0
+            && base.approved_at > 0
+            && current_ledger > base.approved_at + config.exec_window_ledgers
+        {
+            base.status = ProposalStatus::Expired;
+            storage::set_proposal(&env, &base);
+            storage::pending_expiry_index_remove(&env, proposal_id);
+            return Err(VaultError::ProposalExecutionWindowExpired);
+        }
+        if base.unlock_ledger > 0 && current_ledger < base.unlock_ledger {
+            return Err(VaultError::TimelockNotExpired);
+        }
+        // Timelock based on summed phase transfer/vesting amounts so an
+        // upgrade-grade multi-phase change cannot bypass the timelock.
+        let mp_check = storage::get_multi_phase_proposal(&env, proposal_id)
+            .ok_or(VaultError::MultiPhaseProposalNotFound)?;
+        let mut phased_total: i128 = 0;
+        for phase in mp_check.phases.iter() {
+            match &phase.operation {
+                ProposalOperation::Transfer(_, _, amount, _) => {
+                    phased_total = phased_total.saturating_add(*amount);
+                }
+                ProposalOperation::CreateVesting(_, _, total, _, _, _) => {
+                    phased_total = phased_total.saturating_add(*total);
+                }
+                _ => {}
+            }
+        }
+        if config.timelock_threshold > 0
+            && phased_total >= config.timelock_threshold
+            && (base.approved_at == 0
+                || current_ledger < base.approved_at.saturating_add(config.timelock_delay))
+        {
+            return Err(VaultError::TimelockNotExpired);
+        }
+        for dependency_id in base.depends_on.iter() {
+            if let Ok(dep) = storage::get_proposal(&env, dependency_id) {
+                if dep.status != ProposalStatus::Executed {
+                    return Err(VaultError::ProposalNotApproved);
+                }
+                if dep.execution_ledger == 0 || dep.execution_ledger >= current_ledger {
+                    return Err(VaultError::DependencyNotExecuted);
+                }
+            } else {
+                return Err(VaultError::ProposalNotFound);
+            }
+        }
+        storage::set_proposal_in_progress(&env, proposal_id);
+
         let mut mp = storage::get_multi_phase_proposal(&env, proposal_id)
             .ok_or(VaultError::MultiPhaseProposalNotFound)?;
 
@@ -18159,6 +18219,7 @@ impl VaultDAO {
             base.status = ProposalStatus::Rejected;
             storage::set_proposal(&env, &base);
             storage::set_multi_phase_proposal(&env, &mp);
+            storage::clear_proposal_in_progress(&env, proposal_id);
 
             return Ok(PhaseExecutionOutcome {
                 proposal_id,
@@ -18173,6 +18234,7 @@ impl VaultDAO {
         storage::pending_expiry_index_remove(&env, proposal_id);
         storage::set_proposal(&env, &base);
         storage::set_multi_phase_proposal(&env, &mp);
+        storage::clear_proposal_in_progress(&env, proposal_id);
 
         Ok(PhaseExecutionOutcome {
             proposal_id,
