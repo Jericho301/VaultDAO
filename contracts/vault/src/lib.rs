@@ -16900,7 +16900,14 @@ impl VaultDAO {
 
         sub.total_payments += 1;
         sub.last_payment_ledger = current_ledger;
-        sub.next_renewal_ledger = current_ledger + sub.interval_ledgers;
+        // Advance from the previous due date so late renewals (within the
+        // grace period) don't push every future renewal later and grant free
+        // time. Catch up across multiple missed periods explicitly.
+        let mut next = sub.next_renewal_ledger.saturating_add(sub.interval_ledgers);
+        while next <= current_ledger {
+            next = next.saturating_add(sub.interval_ledgers);
+        }
+        sub.next_renewal_ledger = next;
 
         let payment_number = sub.total_payments;
         let amount = sub.amount_per_period;
