@@ -13916,6 +13916,12 @@ impl VaultDAO {
             return Err(VaultError::InvalidAmount);
         }
 
+        // The designated arbitrator must be neutral: it cannot be the funder
+        // or the recipient, otherwise it could trivially rule in its own favor.
+        if arbitrator == funder || arbitrator == recipient {
+            return Err(VaultError::Unauthorized);
+        }
+
         // Transfer tokens to vault (held in escrow)
         token::transfer_to_vault(&env, &token_addr, &funder, amount);
         storage::reserve_escrow(&env, &token_addr, amount);
@@ -14153,7 +14159,12 @@ impl VaultDAO {
         Ok(())
     }
 
-    /// Resolve an escrow dispute ? admin only.
+    /// Resolve an escrow dispute — designated arbitrator (or Admin override).
+    ///
+    /// Only the arbitrator named at escrow creation may resolve the dispute.
+    /// An Admin may override as an explicit backstop (e.g. arbitrator
+    /// unavailable); any other caller — including a vault-wide
+    /// DisputeArbitrator who was not designated for this escrow — is rejected.
     /// If `release_to_recipient` is true, funds go to recipient; otherwise refunded to funder.
     pub fn resolve_escrow_dispute(
         env: Env,
@@ -14171,6 +14182,11 @@ impl VaultDAO {
         }
 
         let mut escrow = storage::get_escrow(&env, escrow_id)?;
+
+        // Enforce the designated arbitrator; Admin may explicitly override.
+        if arbitrator != escrow.arbitrator && role != Role::Admin {
+            return Err(VaultError::Unauthorized);
+        }
 
         if escrow.status != EscrowStatus::Disputed {
             return Err(VaultError::ProposalNotPending);
