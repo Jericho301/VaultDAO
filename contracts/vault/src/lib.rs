@@ -3204,6 +3204,9 @@ impl VaultDAO {
         let mut depth = 1u32;
         let mut current = delegate.clone();
         let current_ledger = env.ledger().sequence() as u64;
+        if expiry_ledger != 0 && expiry_ledger <= current_ledger {
+            return Err(VaultError::InvalidDeadline);
+        }
 
         loop {
             let delegation = storage::get_delegation(&env, &current);
