@@ -56,6 +56,12 @@ function createPersistence(records: ProposalActivityRecord[]): ProposalActivityP
       records.filter((record) => record.proposalId === proposalId),
     getByContractId: async (contractId: string) =>
       records.filter((record) => record.metadata.contractId === contractId),
+    getByTransactionHash: async (contractId: string, txHash: string) =>
+      records.filter(
+        (record) =>
+          record.metadata.contractId === contractId &&
+          record.metadata.transactionHash === txHash,
+      ),
     getSummary: async () => null,
   };
 }
@@ -122,6 +128,36 @@ test("TransactionsService getTransactionByHash returns matching transaction", as
   const found = await service.getTransactionByHash("contract-1", "tx-match");
   assert.ok(found);
   assert.equal(found?.transactionHash, "tx-match");
+});
+
+test("TransactionsService getTransactionByHash finds an old transaction beyond 200 entries", async () => {
+  // The target is the *oldest* of 250 executed transactions, so a lookup that
+  // paged through the 200 most recent results would miss it.
+  const records = Array.from({ length: 250 }, (_, i) =>
+    makeExecutedRecord(i + 1, { txHash: `tx-${i + 1}` }),
+  );
+  const service = new TransactionsService(createPersistence(records));
+
+  const found = await service.getTransactionByHash("contract-1", "tx-1");
+
+  assert.ok(found);
+  assert.equal(found?.transactionHash, "tx-1");
+});
+
+test("TransactionsService getTransactionByHash scans the full persistence when no hash lookup exists", async () => {
+  const records = Array.from({ length: 250 }, (_, i) =>
+    makeExecutedRecord(i + 1, { txHash: `tx-${i + 1}` }),
+  );
+  const { getByTransactionHash: _omitted, ...withoutHashLookup } =
+    createPersistence(records);
+  const service = new TransactionsService(
+    withoutHashLookup as ProposalActivityPersistence,
+  );
+
+  const found = await service.getTransactionByHash("contract-1", "tx-1");
+
+  assert.ok(found);
+  assert.equal(found?.transactionHash, "tx-1");
 });
 
 test("getTransactionsController returns filtered response shape", async () => {
