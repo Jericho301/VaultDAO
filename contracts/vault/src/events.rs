@@ -713,6 +713,17 @@ pub fn emit_hook_executed(
     );
 }
 
+/// Emit when a hook call fails during proposal execution (#1892)
+///
+/// Topics: `("hook_failed", proposal_id)`
+/// Data:   `(hook, is_pre)`
+pub fn emit_hook_failed(env: &Env, proposal_id: u64, hook: &Address, is_pre: bool) {
+    env.events().publish(
+        (Symbol::new(env, "hook_failed"), proposal_id),
+        (hook.clone(), is_pre),
+    );
+}
+
 /// Emit when liquidity is removed
 #[allow(dead_code)]
 pub fn emit_liquidity_removed(env: &Env, proposal_id: u64, dex: &Address, lp_tokens: i128) {
@@ -1335,6 +1346,15 @@ pub fn emit_recovery_cancelled(env: &Env, proposal_id: u64, canceller: &Address)
     env.events().publish(
         (Symbol::new(env, "recovery_cancelled"), proposal_id),
         canceller.clone(),
+    );
+}
+
+/// Emit when a guardian casts a cancel vote that does not yet cancel the
+/// recovery (Issue #1936). The proposal stays Approved.
+pub fn emit_recovery_cancel_voted(env: &Env, proposal_id: u64, guardian: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "recovery_cancel_voted"), proposal_id),
+        guardian.clone(),
     );
 }
 
@@ -2548,6 +2568,17 @@ pub fn emit_vesting_cancelled(
 /// Topics: `("phase_executed", proposal_id)`
 /// Data:   `(phase_index, executor)`
 pub fn emit_phase_executed(env: &Env, proposal_id: u64, phase_index: u32, executor: &Address) {
+/// Emit when a proposal phase executes successfully.
+///
+/// Topics: `("phase_executed", proposal_id)`
+/// Data:   `(phase_index, status, error_code)`
+pub fn emit_phase_executed(
+    env: &Env,
+    proposal_id: u64,
+    phase_index: u32,
+    executor: &Address,
+    ledger: u64,
+) {
     env.events().publish(
         (Symbol::new(env, "phase_executed"), proposal_id),
         (phase_index, executor.clone()),
@@ -2558,6 +2589,11 @@ pub fn emit_phase_executed(env: &Env, proposal_id: u64, phase_index: u32, execut
 ///
 /// Topics: `("phase_failed", proposal_id)`
 /// Data:   `(phase_index, error_code, executor)`
+/// Data:   `(phase_index, executor, error_code)`
+/// Emit when a proposal phase fails.
+///
+/// Topics: `("phase_failed", proposal_id)`
+/// Data:   `(phase_index, status, error_code)`
 pub fn emit_phase_failed(
     env: &Env,
     proposal_id: u64,
@@ -2579,6 +2615,7 @@ pub fn emit_phase_rolled_back(env: &Env, proposal_id: u64, phase_index: u32, exe
     env.events().publish(
         (Symbol::new(env, "phase_rolled_back"), proposal_id),
         (phase_index, executor.clone()),
+        (phase_index, executor.clone(), error_code),
     );
 }
 
