@@ -35,6 +35,7 @@ import {
   SnapshotRebuildLockManager,
   InMemoryLockBackend,
 } from "./rebuild-lock.manager.js";
+import { isTransientError } from "./errors.js";
 
 import { createLogger } from "../../shared/logging/logger.js";
 import { randomUUID } from "node:crypto";

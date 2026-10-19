@@ -7,6 +7,15 @@
 
 export { SnapshotService } from "./snapshot.service.js";
 export { SnapshotNormalizer } from "./normalizer.js";
+export {
+  SnapshotOperationError,
+  TransientStorageError,
+  PermanentStorageError,
+  TransientNetworkError,
+  PermanentNetworkError,
+  isTransientError,
+} from "./errors.js";
+export type { FailureDisposition } from "./errors.js";
 export { MemorySnapshotAdapter } from "./adapters/index.js";
 export { SnapshotDiffService, InMemorySnapshotDiffAdapter } from "./snapshot-diff.service.js";
 
