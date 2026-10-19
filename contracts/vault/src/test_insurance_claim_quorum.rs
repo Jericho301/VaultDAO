@@ -566,6 +566,51 @@ fn test_non_signer_cannot_close_voting() {
 }
 
 // ============================================================================
+// Issue #1907: vote_deadline must have an upper bound
+// ============================================================================
+
+#[test]
+fn test_claim_with_far_future_deadline_is_rejected() {
+    let env = Env::default();
+    let (client, _admin, _signers, claimant, token) = setup(&env, 4);
+    let token_client = soroban_sdk::token::Client::new(&env, &token);
+    let claimant_before = token_client.balance(&claimant);
+
+    // Roughly a decade of ledgers beyond the voting window: a claim like this
+    // would stay open, holding the bond, until every eligible voter has voted.
+    let far_deadline = START_LEDGER as u64 + 5_000_000;
+    let res = client.try_submit_insurance_claim(
+        &claimant,
+        &token,
+        &1_000i128,
+        &evidence(&env),
+        &far_deadline,
+    );
+
+    assert!(res.is_err(), "a decade-long vote_deadline must be refused");
+    assert_eq!(
+        token_client.balance(&claimant),
+        claimant_before,
+        "no bond may be taken for a rejected claim"
+    );
+}
+
+#[test]
+fn test_claim_deadline_just_past_window_cap_is_rejected() {
+    let env = Env::default();
+    let (client, _admin, _signers, claimant, token) = setup(&env, 4);
+
+    // Default voting window is 720 ledgers in this config; anything far past
+    // the window must not be accepted as a caller-chosen deadline.
+    let res = client.try_submit_insurance_claim(
+        &claimant,
+        &token,
+        &1_000i128,
+        &evidence(&env),
+        &(START_LEDGER as u64 + 100_000),
+    );
+
+    assert!(res.is_err(), "deadline 100k ledgers out must be refused");
 // Issue #1983: signer-set changes during an open claim
 // ============================================================================
 
