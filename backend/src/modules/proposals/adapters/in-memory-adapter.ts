@@ -36,6 +36,12 @@ export class InMemoryProposalActivityAdapter implements SyncProposalActivityPers
       .sort((a, b) => a.timestamp - b.timestamp);
   }
 
+  getByTransactionHash(contractId: string, txHash: string): ProposalActivity[] {
+    return [...this.store.values()]
+      .filter((r) => r.contractId === contractId && r.txHash === txHash)
+      .sort((a, b) => a.timestamp - b.timestamp);
+  }
+
   getSummary(proposalId: string): ProposalActivitySyncSummary | null {
     const records = this.getByProposalId(proposalId);
     if (records.length === 0) return null;

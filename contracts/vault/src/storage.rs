@@ -346,6 +346,8 @@ pub enum FeatureKey {
     RecoveryProposal(u64),
     /// Recovery config change proposal by ID -> RecoveryConfigChangeProposal (Issue #1702)
     RecoveryConfigChangeProposal(u64),
+    /// ID of the most recently initiated recovery proposal -> u64 (Issue #1934)
+    ActiveRecoveryId,
     /// Insurance pool accumulated slashed funds (Token Address) -> i128
     /// Funding round by ID -> FundingRound
     FundingRound(u64),
@@ -676,6 +678,11 @@ pub fn get_vesting_ids_paginated(env: &Env, offset: u64, limit: u64) -> Vec<u64>
     ids
 }
 
+/// One page of vesting schedule IDs in ascending ID order, starting strictly
+/// after `start_after_id` (#1744).
+///
+/// Cursor-based counterpart to `get_vesting_ids_paginated`; pass the last ID
+/// received (or 0 to start from the beginning).
 /// Cursor-based pagination over vesting schedule IDs.
 ///
 /// Seeks directly to the position of `start_after_id` (or the first position
@@ -1063,6 +1070,20 @@ pub fn get_proposal_ids_paginated(env: &Env, offset: u64, limit: u64) -> Vec<u64
     ids
 }
 
+/// Return a page of existing proposal IDs in ascending creation order,
+/// starting strictly after `start_after_id`.
+///
+/// This is the cursor-based counterpart to `get_proposal_ids_paginated`:
+/// callers pass the last ID they received (or 0 to start from the
+/// beginning) and receive the next `limit` IDs. Cursor pagination is
+/// stable under concurrent inserts, unlike offset pagination.
+///
+/// # Arguments
+/// * `start_after_id` - Return IDs strictly greater than this value (0 = from start).
+/// * `limit`          - Maximum number of IDs to return. Capped at 100 internally.
+///
+/// # Returns
+/// A vector of proposal IDs in ascending order.
 /// Binary-search the dense proposal ID index for `id`.
 ///
 /// IDs are assigned sequentially starting at 1, so the dense index is the
@@ -1579,6 +1600,18 @@ pub fn get_recurring_payment_ids_paginated(env: &Env, offset: u64, limit: u64) -
     ids
 }
 
+/// Return a page of existing recurring payment IDs in ascending creation
+/// order, starting strictly after `start_after_id`.
+///
+/// Cursor-based counterpart to `get_recurring_payment_ids_paginated`; pass the
+/// last ID received (or 0 to start from the beginning).
+///
+/// # Arguments
+/// * `start_after_id` - Return IDs strictly greater than this value (0 = from start).
+/// * `limit`          - Maximum number of IDs to return. Capped at 100 internally.
+///
+/// # Returns
+/// A vector of recurring payment IDs in ascending order.
 /// Cursor-based pagination over recurring payment IDs.
 ///
 /// Seeks directly to the position of `start_after_id` (or the first position
@@ -3551,7 +3584,8 @@ pub fn calculate_voting_power(env: &Env, addr: &Address) -> i128 {
 // Recovery
 // ============================================================================
 
-fn get_next_recovery_id(env: &Env) -> u64 {
+/// Next recovery proposal ID. Every ID below this value has been allocated.
+pub fn get_next_recovery_id(env: &Env) -> u64 {
     env.storage()
         .instance()
         .get(&FeatureKey::Counter(CounterKey::Recovery))
@@ -3579,6 +3613,19 @@ pub fn get_recovery_proposal(env: &Env, id: u64) -> Result<RecoveryProposal, Vau
         .persistent()
         .get(&FeatureKey::RecoveryProposal(id))
         .ok_or(VaultError::ProposalNotFound)
+}
+
+/// Most recently initiated recovery proposal ID, if any (Issue #1934).
+pub fn get_active_recovery_id(env: &Env) -> Option<u64> {
+    env.storage()
+        .instance()
+        .get(&FeatureKey::ActiveRecoveryId)
+}
+
+pub fn set_active_recovery_id(env: &Env, id: u64) {
+    env.storage()
+        .instance()
+        .set(&FeatureKey::ActiveRecoveryId, &id);
 }
 
 // ============================================================================
