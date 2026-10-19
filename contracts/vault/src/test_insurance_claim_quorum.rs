@@ -611,4 +611,86 @@ fn test_claim_deadline_just_past_window_cap_is_rejected() {
     );
 
     assert!(res.is_err(), "deadline 100k ledgers out must be refused");
+// Issue #1983: signer-set changes during an open claim
+// ============================================================================
+
+#[test]
+fn test_1983_added_signer_cannot_vote_or_trigger_early_close() {
+    let env = Env::default();
+    // 3 signers (admin + 2); claimant is not a signer, so all 3 are eligible.
+    let (client, admin, signers, claimant, token) = setup(&env, 3);
+
+    let deadline = START_LEDGER as u64 + 1_000;
+    let claim_id =
+        client.submit_insurance_claim(&claimant, &token, &1_000i128, &evidence(&env), &deadline);
+    assert_eq!(client.get_insurance_claim(&claim_id).eligible_voters, 3);
+
+    // One vote while the set is unchanged.
+    client.vote_on_insurance_claim(&admin, &claim_id, &true);
+
+    // Add a signer through the governance path (threshold is 2).
+    let newcomer = Address::generate(&env);
+    let mut new_list = Vec::new(&env);
+    for i in 0..signers.len() {
+        new_list.push_back(signers.get(i).unwrap());
+    }
+    new_list.push_back(newcomer.clone());
+    let proposal_id = client.update_config_signers(&admin, &new_list);
+    client.approve_proposal(&admin, &proposal_id);
+    client.approve_proposal(&signers.get(1).unwrap(), &proposal_id);
+    client.execute_proposal(&admin, &proposal_id);
+    assert!(client.is_signer(&newcomer));
+
+    // The newcomer was not in the submission snapshot: no vote.
+    assert_eq!(
+        client.try_vote_on_insurance_claim(&newcomer, &claim_id, &true),
+        Err(Ok(VaultError::Unauthorized))
+    );
+
+    // Snapshot still sizes the quorum (3 eligible, 1 vote): early close fails.
+    assert_eq!(
+        client.try_close_insurance_claim_voting(&admin, &claim_id),
+        Err(Ok(VaultError::ClaimVotingStillOpen))
+    );
+
+    // After the deadline the claim closes normally with snapshot quorum.
+    env.ledger().set_sequence_number(deadline as u32 + 1);
+    let status = client.close_insurance_claim_voting(&admin, &claim_id);
+    assert_eq!(status, InsuranceClaimStatus::Expired);
+}
+
+#[test]
+fn test_1983_removed_signer_cannot_vote_quorum_uses_snapshot() {
+    let env = Env::default();
+    // 4 signers; claimant is not a signer, so all 4 are eligible.
+    let (client, admin, signers, claimant, token) = setup(&env, 4);
+
+    let deadline = START_LEDGER as u64 + 1_000;
+    let claim_id =
+        client.submit_insurance_claim(&claimant, &token, &1_000i128, &evidence(&env), &deadline);
+    assert_eq!(client.get_insurance_claim(&claim_id).eligible_voters, 4);
+
+    // Remove one signer mid-vote (threshold is 2, so removal is allowed).
+    let removed = signers.get(3).unwrap();
+    client.remove_signer(&admin, &removed);
+    assert!(!client.is_signer(&removed));
+
+    // The removed signer is no longer in the live set: no vote.
+    assert_eq!(
+        client.try_vote_on_insurance_claim(&removed, &claim_id, &true),
+        Err(Ok(VaultError::Unauthorized))
+    );
+
+    // Quorum is still computed from the 4-voter snapshot, not the 3 live
+    // signers: required = ceil(4 * 5000 / 10000) = 2.
+    let (_voted, required, eligible) = client.get_insurance_claim_quorum(&claim_id);
+    assert_eq!(eligible, 4);
+    assert_eq!(required, 2);
+
+    // Two snapshot-eligible votes meet quorum; close after the deadline.
+    client.vote_on_insurance_claim(&admin, &claim_id, &true);
+    client.vote_on_insurance_claim(&signers.get(1).unwrap(), &claim_id, &true);
+    env.ledger().set_sequence_number(deadline as u32 + 1);
+    let status = client.close_insurance_claim_voting(&admin, &claim_id);
+    assert_eq!(status, InsuranceClaimStatus::Approved);
 }

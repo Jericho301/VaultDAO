@@ -63,6 +63,29 @@ export class MemoryProposalPersistence implements ProposalActivityPersistence {
   }
 
   /**
+   * Gets all activity records matching a transaction hash for a contract.
+   */
+  public async getByTransactionHash(
+    contractId: string,
+    txHash: string,
+  ): Promise<ProposalActivityRecord[]> {
+    const result: ProposalActivityRecord[] = [];
+
+    for (const records of this.records.values()) {
+      for (const record of records) {
+        if (
+          record.metadata.contractId === contractId &&
+          record.metadata.transactionHash === txHash
+        ) {
+          result.push(record);
+        }
+      }
+    }
+
+    return result;
+  }
+
+  /**
    * Gets the activity summary for a proposal.
    */
   public async getSummary(proposalId: string): Promise<ProposalActivitySummary | null> {
