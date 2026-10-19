@@ -35,6 +35,7 @@ import {
   SnapshotRebuildLockManager,
   InMemoryLockBackend,
 } from "./rebuild-lock.manager.js";
+import { isTransientError } from "./errors.js";
 
 import { createLogger } from "../../shared/logging/logger.js";
 import { randomUUID } from "node:crypto";
@@ -42,27 +43,6 @@ import { randomUUID } from "node:crypto";
 const logger = createLogger("snapshot-service");
 
 const REBUILD_BATCH_SIZE = 200;
-
-const TRANSIENT_ERROR_PATTERNS = [
-  /lock/i,
-  /timeout/i,
-  /busy/i,
-  /econnreset/i,
-  /econnrefused/i,
-  /socket/i,
-];
-const PERMANENT_ERROR_PATTERNS = [
-  /validation/i,
-  /schema/i,
-  /invalid/i,
-  /constraint/i,
-];
-
-function isTransientError(err: unknown): boolean {
-  const msg = String(err);
-  if (PERMANENT_ERROR_PATTERNS.some((p) => p.test(msg))) return false;
-  return TRANSIENT_ERROR_PATTERNS.some((p) => p.test(msg));
-}
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
