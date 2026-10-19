@@ -2942,6 +2942,10 @@ pub struct InsuranceClaim {
     pub voting_window: u64,
     /// Number of signers eligible to vote, snapshotted at submission.
     pub eligible_voters: u32,
+    /// Signer list snapshotted at submission (claimant excluded). Voters are
+    /// validated against this snapshot so later membership changes cannot
+    /// move the goalposts on an in-flight claim.
+    pub eligible_signers: soroban_sdk::Vec<soroban_sdk::Address>,
     /// Number of distinct voters that have cast a vote so far.
     pub voter_count: u32,
     /// Set once the voting period has been explicitly closed and tallied.
@@ -3162,6 +3166,8 @@ pub struct PaginationCursor {
     pub start_after_id: u64,
     /// Maximum number of items to return (capped at `MAX_PAGE_LIMIT`).
     pub limit: u32,
+}
+
 // Pending Reservation Exposure
 // ============================================================================
 

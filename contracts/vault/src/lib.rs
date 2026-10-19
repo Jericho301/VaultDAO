@@ -6519,16 +6519,21 @@ impl VaultDAO {
         // retroactively move the quorum for this claim. The claimant is excluded when
         // they are themselves a signer — they may not vote on their own claim, so
         // counting them would make a full-participation quorum unreachable.
-        let eligible_voters = match storage::get_config(&env) {
+        // Both the count and the full list are frozen: the list validates voters
+        // (newly added signers cannot vote on this claim) and sizes the quorum.
+        let (eligible_voters, eligible_signers) = match storage::get_config(&env) {
             Ok(c) => {
-                let signers = c.signers.len();
-                if c.signers.contains(&claimant) {
-                    signers.saturating_sub(1)
-                } else {
-                    signers
+                let mut snapshot = Vec::new(&env);
+                for i in 0..c.signers.len() {
+                    if let Some(s) = c.signers.get(i) {
+                        if s != claimant {
+                            snapshot.push_back(s.clone());
+                        }
+                    }
                 }
+                (snapshot.len(), snapshot)
             }
-            Err(_) => 0,
+            Err(_) => (0, Vec::new(&env)),
         };
 
         // Bond = 10% of claim, minimum 100 stroops
@@ -6556,6 +6561,7 @@ impl VaultDAO {
             quorum_bps,
             voting_window,
             eligible_voters,
+            eligible_signers,
             voter_count: 0,
             voting_closed: false,
         };
@@ -6630,6 +6636,13 @@ impl VaultDAO {
         // without changing the ratio arithmetic used for the threshold.
         let config = storage::get_config(&env)?;
         if !config.signers.contains(&voter) {
+            return Err(VaultError::Unauthorized);
+        }
+        // The voter must also have been eligible at submission time: signers
+        // added after the claim was filed cannot vote on it. (An empty snapshot
+        // means a legacy claim filed before snapshotting existed, which falls
+        // back to the current-config check above.)
+        if !claim.eligible_signers.is_empty() && !claim.eligible_signers.contains(&voter) {
             return Err(VaultError::Unauthorized);
         }
         let staking_config = storage::get_staking_config(&env);
@@ -6769,11 +6782,18 @@ impl VaultDAO {
     ///
     /// Rounds up, so a 50% quorum over 3 signers requires 2 voters, not 1.
     fn claim_required_voters(claim: &InsuranceClaim) -> u32 {
-        if claim.eligible_voters == 0 || claim.quorum_bps == 0 {
+        // Quorum is sized from the snapshot taken at submission, never from
+        // the live signer set (which may have grown or shrunk since).
+        let eligible = if claim.eligible_signers.is_empty() {
+            claim.eligible_voters
+        } else {
+            claim.eligible_signers.len()
+        };
+        if eligible == 0 || claim.quorum_bps == 0 {
             return 0;
         }
-        let required = (claim.eligible_voters as u64 * claim.quorum_bps as u64).div_ceil(10_000);
-        (required.max(1) as u32).min(claim.eligible_voters)
+        let required = (eligible as u64 * claim.quorum_bps as u64).div_ceil(10_000);
+        (required.max(1) as u32).min(eligible)
     }
 
     /// Slash 10% of the claimant's bond into the pool and return the remainder.
@@ -13919,6 +13939,12 @@ impl VaultDAO {
             return Err(VaultError::InvalidAmount);
         }
 
+        // The designated arbitrator must be neutral: it cannot be the funder
+        // or the recipient, otherwise it could trivially rule in its own favor.
+        if arbitrator == funder || arbitrator == recipient {
+            return Err(VaultError::Unauthorized);
+        }
+
         // Transfer tokens to vault (held in escrow)
         token::transfer_to_vault(&env, &token_addr, &funder, amount);
         storage::reserve_escrow(&env, &token_addr, amount);
@@ -14156,7 +14182,12 @@ impl VaultDAO {
         Ok(())
     }
 
-    /// Resolve an escrow dispute ? admin only.
+    /// Resolve an escrow dispute — designated arbitrator (or Admin override).
+    ///
+    /// Only the arbitrator named at escrow creation may resolve the dispute.
+    /// An Admin may override as an explicit backstop (e.g. arbitrator
+    /// unavailable); any other caller — including a vault-wide
+    /// DisputeArbitrator who was not designated for this escrow — is rejected.
     /// If `release_to_recipient` is true, funds go to recipient; otherwise refunded to funder.
     pub fn resolve_escrow_dispute(
         env: Env,
@@ -14174,6 +14205,11 @@ impl VaultDAO {
         }
 
         let mut escrow = storage::get_escrow(&env, escrow_id)?;
+
+        // Enforce the designated arbitrator; Admin may explicitly override.
+        if arbitrator != escrow.arbitrator && role != Role::Admin {
+            return Err(VaultError::Unauthorized);
+        }
 
         if escrow.status != EscrowStatus::Disputed {
             return Err(VaultError::ProposalNotPending);
