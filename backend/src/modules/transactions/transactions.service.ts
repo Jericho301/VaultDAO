@@ -6,7 +6,10 @@
  */
 
 import { ProposalActivityType } from "../proposals/types.js";
-import type { ProposalActivityPersistence } from "../proposals/types.js";
+import type {
+  ProposalActivityPersistence,
+  ProposalActivityRecord,
+} from "../proposals/types.js";
 import type {
   GetTransactionsParams,
   GetTransactionsResult,
@@ -100,6 +103,21 @@ export class TransactionsService {
     return typeof value === "string" ? value : "";
   }
 
+  private static toTransaction(record: ProposalActivityRecord): Transaction {
+    const data = record.data ?? {};
+    return {
+      proposalId: record.proposalId,
+      contractId: record.metadata.contractId,
+      transactionHash: record.metadata.transactionHash,
+      ledger: record.metadata.ledger,
+      timestamp: record.timestamp,
+      executor: TransactionsService.readDataString(data, "executor"),
+      recipient: TransactionsService.readDataString(data, "recipient"),
+      token: TransactionsService.readDataString(data, "token"),
+      amount: TransactionsService.readDataString(data, "amount"),
+    };
+  }
+
   private async ensureIndex(contractId: string): Promise<IndexedEntry[]> {
     const now = Date.now();
     const lastBuilt = this.indexTimestamps.get(contractId) ?? 0;
@@ -112,18 +130,7 @@ export class TransactionsService {
     const entries: IndexedEntry[] = allRecords
       .filter((record) => record.type === ProposalActivityType.EXECUTED)
       .map((record): IndexedEntry => {
-        const data = record.data ?? {};
-        const tx: Transaction = {
-          proposalId: record.proposalId,
-          contractId: record.metadata.contractId,
-          transactionHash: record.metadata.transactionHash,
-          ledger: record.metadata.ledger,
-          timestamp: record.timestamp,
-          executor: TransactionsService.readDataString(data, "executor"),
-          recipient: TransactionsService.readDataString(data, "recipient"),
-          token: TransactionsService.readDataString(data, "token"),
-          amount: TransactionsService.readDataString(data, "amount"),
-        };
+        const tx = TransactionsService.toTransaction(record);
 
         if (this.horizonUrl && record.metadata.transactionHash) {
           void this.attachMemoInfo(record.metadata.transactionHash, tx).catch(
@@ -242,18 +249,7 @@ export class TransactionsService {
     const txs: Transaction[] = [];
     for (const record of records) {
       if (record.type !== ProposalActivityType.EXECUTED) continue;
-      const data = record.data ?? {};
-      const tx: Transaction = {
-        proposalId: record.proposalId,
-        contractId: record.metadata.contractId,
-        transactionHash: record.metadata.transactionHash,
-        ledger: record.metadata.ledger,
-        timestamp: record.timestamp,
-        executor: TransactionsService.readDataString(data, "executor"),
-        recipient: TransactionsService.readDataString(data, "recipient"),
-        token: TransactionsService.readDataString(data, "token"),
-        amount: TransactionsService.readDataString(data, "amount"),
-      };
+      const tx = TransactionsService.toTransaction(record);
 
       if (this.horizonUrl && tx.transactionHash) {
         try {
@@ -297,11 +293,35 @@ export class TransactionsService {
     await this.ensureIndex(contractId);
     const entry = this.index.getByHash(contractId, txHash);
     if (entry) return entry.tx;
-    const result = await this.getTransactions({
-      contractId,
-      limit: Number.MAX_SAFE_INTEGER,
-    });
-    return result.data.find((tx) => tx.transactionHash === txHash) ?? null;
+
+    // The index has a short TTL and may not yet include a just-persisted
+    // transaction, so query the persistence layer directly by hash. Fall back
+    // to a full contract scan only for adapters without a hash lookup — never
+    // to getTransactions(), which clamps its result window to 200.
+    const byHash = this.persistence.getByTransactionHash?.bind(this.persistence);
+    const records = byHash
+      ? await byHash(contractId, txHash)
+      : await this.persistence.getByContractId(contractId);
+
+    const record = records.find(
+      (candidate) =>
+        candidate.type === ProposalActivityType.EXECUTED &&
+        candidate.metadata.contractId === contractId &&
+        candidate.metadata.transactionHash === txHash,
+    );
+    if (!record) return null;
+
+    const tx = TransactionsService.toTransaction(record);
+
+    if (this.horizonUrl && tx.transactionHash) {
+      try {
+        await this.attachMemoInfo(tx.transactionHash, tx);
+      } catch {
+        // ignore — memo enrichment is best-effort
+      }
+    }
+
+    return tx;
   }
 
   invalidateIndex(contractId: string): void {

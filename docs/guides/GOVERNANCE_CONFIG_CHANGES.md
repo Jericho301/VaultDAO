@@ -116,7 +116,7 @@ Governance does not check the limit hierarchy (`spending ≤ daily ≤ weekly`),
 | `stream_max_window_amount`, `burst_factor` | Admin | `update_stream_rate_config`, `set_stream_burst_factor` |
 | `approval_timeout_ledgers` | Admin | `update_approval_timeout` |
 | `exec_window_ledgers` | Admin | `set_exec_window_ledgers` |
-| `recovery_config` | Admin | `set_recovery_config` |
+| `recovery_config` | **Governance** (signer supermajority) | `propose_recovery_config_change` → `approve_recovery_config_change` → `execute_recovery_config_change`. `set_recovery_config` is deprecated and always reverts with `InsufficientRole`. See [WALLET_RECOVERY.md](./WALLET_RECOVERY.md) |
 | `whitelist_mode` | Admin | `set_whitelist_mode` |
 | `min_participation_rate`, `low_participation_streak_n`, `participation_rate_window` | Admin | `update_participation_config` |
 | `timelock_threshold` | Init only | `initialize` |
@@ -176,4 +176,5 @@ These are the overlaps operators most often miss. Each one lets a single key und
 
 - [`../reference/SECURITY.md`](../reference/SECURITY.md): vulnerability disclosure policy
 - [`../reference/AUDIT_SCOPE.md`](../reference/AUDIT_SCOPE.md): known attack surfaces and findings
+- [`WALLET_RECOVERY.md`](./WALLET_RECOVERY.md): guardian-based recovery, including its governance config flow
 - [`TREASURY_RISK_MANAGEMENT.md`](./TREASURY_RISK_MANAGEMENT.md)
