@@ -3204,6 +3204,9 @@ impl VaultDAO {
         let mut depth = 1u32;
         let mut current = delegate.clone();
         let current_ledger = env.ledger().sequence() as u64;
+        if expiry_ledger != 0 && expiry_ledger <= current_ledger {
+            return Err(VaultError::InvalidDeadline);
+        }
 
         loop {
             let delegation = storage::get_delegation(&env, &current);
@@ -16897,7 +16900,14 @@ impl VaultDAO {
 
         sub.total_payments += 1;
         sub.last_payment_ledger = current_ledger;
-        sub.next_renewal_ledger = current_ledger + sub.interval_ledgers;
+        // Advance from the previous due date so late renewals (within the
+        // grace period) don't push every future renewal later and grant free
+        // time. Catch up across multiple missed periods explicitly.
+        let mut next = sub.next_renewal_ledger.saturating_add(sub.interval_ledgers);
+        while next <= current_ledger {
+            next = next.saturating_add(sub.interval_ledgers);
+        }
+        sub.next_renewal_ledger = next;
 
         let payment_number = sub.total_payments;
         let amount = sub.amount_per_period;
@@ -18069,6 +18079,66 @@ impl VaultDAO {
             return Err(VaultError::ProposalNotApproved);
         }
 
+        let current_ledger = env.ledger().sequence() as u64;
+        if storage::is_proposal_in_progress(&env, proposal_id) {
+            return Err(VaultError::ProposalNotApproved);
+        }
+        if current_ledger > base.expires_at {
+            base.status = ProposalStatus::Expired;
+            storage::set_proposal(&env, &base);
+            storage::pending_expiry_index_remove(&env, proposal_id);
+            return Err(VaultError::PermissionExpired);
+        }
+        let config = storage::get_config(&env)?;
+        if config.exec_window_ledgers > 0
+            && base.approved_at > 0
+            && current_ledger > base.approved_at + config.exec_window_ledgers
+        {
+            base.status = ProposalStatus::Expired;
+            storage::set_proposal(&env, &base);
+            storage::pending_expiry_index_remove(&env, proposal_id);
+            return Err(VaultError::ProposalExecutionWindowExpired);
+        }
+        if base.unlock_ledger > 0 && current_ledger < base.unlock_ledger {
+            return Err(VaultError::TimelockNotExpired);
+        }
+        // Timelock based on summed phase transfer/vesting amounts so an
+        // upgrade-grade multi-phase change cannot bypass the timelock.
+        let mp_check = storage::get_multi_phase_proposal(&env, proposal_id)
+            .ok_or(VaultError::MultiPhaseProposalNotFound)?;
+        let mut phased_total: i128 = 0;
+        for phase in mp_check.phases.iter() {
+            match &phase.operation {
+                ProposalOperation::Transfer(_, _, amount, _) => {
+                    phased_total = phased_total.saturating_add(*amount);
+                }
+                ProposalOperation::CreateVesting(_, _, total, _, _, _) => {
+                    phased_total = phased_total.saturating_add(*total);
+                }
+                _ => {}
+            }
+        }
+        if config.timelock_threshold > 0
+            && phased_total >= config.timelock_threshold
+            && (base.approved_at == 0
+                || current_ledger < base.approved_at.saturating_add(config.timelock_delay))
+        {
+            return Err(VaultError::TimelockNotExpired);
+        }
+        for dependency_id in base.depends_on.iter() {
+            if let Ok(dep) = storage::get_proposal(&env, dependency_id) {
+                if dep.status != ProposalStatus::Executed {
+                    return Err(VaultError::ProposalNotApproved);
+                }
+                if dep.execution_ledger == 0 || dep.execution_ledger >= current_ledger {
+                    return Err(VaultError::DependencyNotExecuted);
+                }
+            } else {
+                return Err(VaultError::ProposalNotFound);
+            }
+        }
+        storage::set_proposal_in_progress(&env, proposal_id);
+
         let mut mp = storage::get_multi_phase_proposal(&env, proposal_id)
             .ok_or(VaultError::MultiPhaseProposalNotFound)?;
 
@@ -18149,6 +18219,7 @@ impl VaultDAO {
             base.status = ProposalStatus::Rejected;
             storage::set_proposal(&env, &base);
             storage::set_multi_phase_proposal(&env, &mp);
+            storage::clear_proposal_in_progress(&env, proposal_id);
 
             return Ok(PhaseExecutionOutcome {
                 proposal_id,
@@ -18163,6 +18234,7 @@ impl VaultDAO {
         storage::pending_expiry_index_remove(&env, proposal_id);
         storage::set_proposal(&env, &base);
         storage::set_multi_phase_proposal(&env, &mp);
+        storage::clear_proposal_in_progress(&env, proposal_id);
 
         Ok(PhaseExecutionOutcome {
             proposal_id,
@@ -18425,7 +18497,13 @@ impl VaultDAO {
         start_ledger: u32,
         end_ledger: u32,
     ) -> Result<u64, VaultError> {
-        Self::validate_vesting_params(total, cliff_ledger, start_ledger, end_ledger)?;
+        Self::validate_vesting_params(
+            total,
+            cliff_ledger,
+            start_ledger,
+            end_ledger,
+            env.ledger().sequence(),
+        )?;
 
         let mut phases = Vec::new(&env);
         phases.push_back(ProposalPhase {
@@ -18448,13 +18526,23 @@ impl VaultDAO {
         cliff_ledger: u32,
         start_ledger: u32,
         end_ledger: u32,
+        current_ledger: u32,
     ) -> Result<(), VaultError> {
+        // Maximum vesting duration (~2 years at ~5s/ledger) so schedules
+        // cannot outlive any realistic storage TTL.
+        const MAX_VESTING_DURATION_LEDGERS: u32 = 12_614_400;
         if total <= 0
             || end_ledger <= cliff_ledger
             || end_ledger <= start_ledger
             || cliff_ledger < start_ledger
         {
             return Err(VaultError::InvalidAmount);
+        }
+        if start_ledger < current_ledger {
+            return Err(VaultError::InvalidDeadline);
+        }
+        if end_ledger.saturating_sub(start_ledger) > MAX_VESTING_DURATION_LEDGERS {
+            return Err(VaultError::InvalidDeadline);
         }
         Ok(())
     }
@@ -18473,7 +18561,13 @@ impl VaultDAO {
         start_ledger: u32,
         end_ledger: u32,
     ) -> Result<u64, VaultError> {
-        Self::validate_vesting_params(total, cliff_ledger, start_ledger, end_ledger)?;
+        Self::validate_vesting_params(
+            total,
+            cliff_ledger,
+            start_ledger,
+            end_ledger,
+            env.ledger().sequence(),
+        )?;
         let active = storage::get_active_vesting_count(env);
         if active >= 100 {
             return Err(VaultError::VestingCapReached);
