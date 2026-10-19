@@ -4640,9 +4640,22 @@ pub fn get_tag_index(env: &Env, tag: &Symbol) -> Vec<u64> {
 
 /// Derive a stable u64 hash from a Symbol for use as a DataKey discriminant.
 /// Uses the SHA-256 of the symbol's string bytes (first 8 bytes, little-endian).
-fn symbol_to_u64_key(env: &Env, tag: &Symbol) -> u64 {
+pub fn symbol_to_u64_key(env: &Env, tag: &Symbol) -> u64 {
     let tag_bytes = tag.clone().to_xdr(env);
     let hash = env.crypto().sha256(&tag_bytes);
+    let hash_bytes = hash.to_array();
+    u64::from_le_bytes(hash_bytes[0..8].try_into().unwrap())
+}
+
+/// Fingerprint of a configuration setter's full argument list, used as the
+/// audit entry target so the chain commits to the parameters that were
+/// written without storing them on-chain (#1938).
+///
+/// Hashes the XDR of every argument. Only the first 8 bytes of the SHA-256
+/// digest are kept, matching the other audit targets.
+pub fn args_fingerprint(env: &Env, args: Vec<soroban_sdk::Val>) -> u64 {
+    let args_bytes = args.to_xdr(env);
+    let hash = env.crypto().sha256(&args_bytes);
     let hash_bytes = hash.to_array();
     u64::from_le_bytes(hash_bytes[0..8].try_into().unwrap())
 }
