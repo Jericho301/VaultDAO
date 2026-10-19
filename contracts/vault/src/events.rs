@@ -2563,6 +2563,11 @@ pub fn emit_vesting_cancelled(
 // Multi-Phase Execution Events
 // ============================================================================
 
+/// Emit when a single phase of a multi-phase proposal execution completes.
+///
+/// Topics: `("phase_executed", proposal_id)`
+/// Data:   `(phase_index, executor)`
+pub fn emit_phase_executed(env: &Env, proposal_id: u64, phase_index: u32, executor: &Address) {
 /// Emit when a proposal phase executes successfully.
 ///
 /// Topics: `("phase_executed", proposal_id)`
@@ -2576,13 +2581,14 @@ pub fn emit_phase_executed(
 ) {
     env.events().publish(
         (Symbol::new(env, "phase_executed"), proposal_id),
-        (phase_index, executor.clone(), ledger),
+        (phase_index, executor.clone()),
     );
 }
 
 /// Emit when a phase of a multi-phase proposal execution fails.
 ///
 /// Topics: `("phase_failed", proposal_id)`
+/// Data:   `(phase_index, error_code, executor)`
 /// Data:   `(phase_index, executor, error_code)`
 /// Emit when a proposal phase fails.
 ///
@@ -2597,6 +2603,18 @@ pub fn emit_phase_failed(
 ) {
     env.events().publish(
         (Symbol::new(env, "phase_failed"), proposal_id),
+        (phase_index, error_code, executor.clone()),
+    );
+}
+
+/// Emit when a completed phase is rolled back after a later phase fails.
+///
+/// Topics: `("phase_rolled_back", proposal_id)`
+/// Data:   `(phase_index, executor)`
+pub fn emit_phase_rolled_back(env: &Env, proposal_id: u64, phase_index: u32, executor: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "phase_rolled_back"), proposal_id),
+        (phase_index, executor.clone()),
         (phase_index, executor.clone(), error_code),
     );
 }
