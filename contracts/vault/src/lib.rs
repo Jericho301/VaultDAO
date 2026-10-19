@@ -369,6 +369,8 @@ mod test_earmarked_balances;
 #[cfg(test)]
 mod test_execution_recipient_recheck;
 #[cfg(test)]
+mod test_oracle_failure;
+#[cfg(test)]
 mod test_fees;
 #[cfg(test)]
 mod test_hooks;
@@ -11956,11 +11958,19 @@ impl VaultDAO {
 
         // Interface with standard Oracle contract
         // lastprice(asset: Address) -> Option<VaultPriceData>
-        let price_data: Option<VaultPriceData> = env.invoke_contract(
+        // Use `try_invoke_contract` so a trapping, paused, or incompatible oracle
+        // surfaces as `OracleError` instead of aborting the caller.
+        let price_data: Option<VaultPriceData> = match env.try_invoke_contract::<
+            Option<VaultPriceData>,
+            soroban_sdk::Error,
+        >(
             &oracle_cfg.address,
             &Symbol::new(env, "lastprice"),
             Vec::from_array(env, [asset.clone().into_val(env)]),
-        );
+        ) {
+            Ok(Ok(data)) => data,
+            _ => return Err(VaultError::OracleError),
+        };
 
         match price_data {
             Some(data) => {
@@ -11975,7 +11985,7 @@ impl VaultDAO {
                 }
                 Ok(data.price)
             }
-            None => Err(VaultError::InvalidAmount), // Price not found
+            None => Err(VaultError::OracleError), // Price not found
         }
     }
 
@@ -11998,7 +12008,9 @@ impl VaultDAO {
         let price = Self::get_asset_price(env, asset)?;
         // Price is in USD scaled by 10^7, amount is in stroops (10^-7 units)
         // Result: (amount * price) / 10^7 = USD value in cents
-        Ok(amount.saturating_mul(price) / 10_000_000)
+        // Overflow is an error, not a silently clamped valuation.
+        let scaled = amount.checked_mul(price).ok_or(VaultError::OracleError)?;
+        Ok(scaled / 10_000_000)
     }
 
     /// Get the total USD valuation of the vault's holdings across multiple assets.
