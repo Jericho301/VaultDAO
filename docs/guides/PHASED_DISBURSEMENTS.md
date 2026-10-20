@@ -176,3 +176,12 @@ Other errors:
   off-chain balance queries until on-chain balance capture lands.
 - Each snapshot emits a `snapshot_taken` event `(ledger, token_count)` that
   indexers can subscribe to.
+
+---
+
+## 6. Related guides
+
+- [Funding rounds](./FUNDING_ROUNDS.md) — milestone-gated payouts held in
+  escrow, released tranche-by-tranche. Use funding rounds when a payout depends
+  on deliverables; use a multi-phase proposal when you want several one-off
+  operations bundled under a single approval.
