@@ -28,6 +28,7 @@ Hands-on how-tos for building and operating features.
 
 - [Recurring payments](guides/RECURRING_PAYMENTS.md)
 - [Phased treasury disbursements](guides/PHASED_DISBURSEMENTS.md)
+- [Funding rounds](guides/FUNDING_ROUNDS.md)
 - [Delegation](guides/DELEGATION_GUIDE.md)
 - [Expiration](guides/EXPIRATION_GUIDE.md)
 - [Approval timeout](guides/APPROVAL_TIMEOUT.md)
@@ -36,6 +37,7 @@ Hands-on how-tos for building and operating features.
 - [Token vesting](guides/VESTING.md)
 - [Treasury risk management](guides/TREASURY_RISK_MANAGEMENT.md)
 - [Governance config changes](guides/GOVERNANCE_CONFIG_CHANGES.md)
+- [Wallet recovery](guides/WALLET_RECOVERY.md)
 - [Advanced dashboard](guides/ADVANCED_DASHBOARD.md)
 - [Widget development](guides/WIDGET_DEVELOPMENT.md)
 

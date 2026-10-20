@@ -106,10 +106,16 @@ fn create_escrow(
     (escrow_id, recipient)
 }
 
-fn arbitrator(env: &Env, client: &VaultDAOClient, admin: &Address) -> Address {
-    let arbitrator = Address::generate(env);
-    client.set_role(admin, &arbitrator, &Role::DisputeArbitrator);
-    arbitrator
+fn arbitrator(
+    env: &Env,
+    client: &VaultDAOClient,
+    admin: &Address,
+    escrow_id: u64,
+) -> Address {
+    // Grant the DisputeArbitrator role to the arbitrator designated at creation.
+    let designated = client.get_escrow_info(&escrow_id).arbitrator;
+    client.set_role(admin, &designated, &Role::DisputeArbitrator);
+    designated
 }
 
 #[test]
@@ -150,7 +156,7 @@ fn test_arbitrator_releases_to_recipient() {
     env.mock_all_auths();
     let (client, admin, token) = setup(&env);
     let (escrow_id, recipient) = create_escrow(&env, &client, &admin, &token);
-    let arbitrator = arbitrator(&env, &client, &admin);
+    let arbitrator = arbitrator(&env, &client, &admin, escrow_id);
 
     client.dispute_escrow(&admin, &escrow_id, &Symbol::new(&env, "non_delivery"));
     client.resolve_escrow_dispute(&arbitrator, &escrow_id, &true);
@@ -168,7 +174,7 @@ fn test_arbitrator_refunds_funder() {
     let (client, admin, token) = setup(&env);
     let funder_before = TokenClient::new(&env, &token).balance(&admin);
     let (escrow_id, recipient) = create_escrow(&env, &client, &admin, &token);
-    let arbitrator = arbitrator(&env, &client, &admin);
+    let arbitrator = arbitrator(&env, &client, &admin, escrow_id);
 
     client.dispute_escrow(&admin, &escrow_id, &Symbol::new(&env, "quality_issue"));
     client.resolve_escrow_dispute(&arbitrator, &escrow_id, &false);
@@ -205,10 +211,134 @@ fn test_cannot_resolve_undisputed_escrow() {
     env.mock_all_auths();
     let (client, admin, token) = setup(&env);
     let (escrow_id, _) = create_escrow(&env, &client, &admin, &token);
-    let arbitrator = arbitrator(&env, &client, &admin);
+    let arbitrator = arbitrator(&env, &client, &admin, escrow_id);
 
     assert_eq!(
         client.try_resolve_escrow_dispute(&arbitrator, &escrow_id, &true),
         Err(Ok(VaultError::ProposalNotPending))
+    );
+}
+
+// ============================================================================
+// Issue #1896: designated escrow arbitrator is enforced
+// ============================================================================
+
+fn create_escrow_with_arbitrator(
+    env: &Env,
+    client: &VaultDAOClient,
+    funder: &Address,
+    token: &Address,
+    arbitrator: &Address,
+) -> u64 {
+    let recipient = Address::generate(env);
+    let mut milestones = Vec::new(env);
+    milestones.push_back(Milestone {
+        id: 1,
+        percentage: 100,
+        release_ledger: 0,
+        is_completed: false,
+        completion_ledger: 0,
+    });
+    client.create_escrow(
+        funder,
+        &recipient,
+        token,
+        &1_000i128,
+        &milestones,
+        &10_000u64,
+        arbitrator,
+    )
+}
+
+#[test]
+fn test_1896_designated_arbitrator_can_resolve() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, token) = setup(&env);
+    let designated = Address::generate(&env);
+    let escrow_id = create_escrow_with_arbitrator(&env, &client, &admin, &token, &designated);
+    client.set_role(&admin, &designated, &Role::DisputeArbitrator);
+
+    client.dispute_escrow(&admin, &escrow_id, &Symbol::new(&env, "bad_goods"));
+    client.resolve_escrow_dispute(&designated, &escrow_id, &true);
+    assert_eq!(
+        client.get_escrow_info(&escrow_id).status,
+        EscrowStatus::Released
+    );
+}
+
+#[test]
+fn test_1896_other_dispute_arbitrator_cannot_resolve() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, token) = setup(&env);
+    let designated = Address::generate(&env);
+    let escrow_id = create_escrow_with_arbitrator(&env, &client, &admin, &token, &designated);
+    client.set_role(&admin, &designated, &Role::DisputeArbitrator);
+
+    let other = Address::generate(&env);
+    client.set_role(&admin, &other, &Role::DisputeArbitrator);
+    client.dispute_escrow(&admin, &escrow_id, &Symbol::new(&env, "bad_goods"));
+    assert_eq!(
+        client.try_resolve_escrow_dispute(&other, &escrow_id, &true),
+        Err(Ok(VaultError::Unauthorized))
+    );
+}
+
+#[test]
+fn test_1896_admin_override_can_resolve() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, token) = setup(&env);
+    let designated = Address::generate(&env);
+    let escrow_id = create_escrow_with_arbitrator(&env, &client, &admin, &token, &designated);
+
+    client.dispute_escrow(&admin, &escrow_id, &Symbol::new(&env, "bad_goods"));
+    client.resolve_escrow_dispute(&admin, &escrow_id, &false);
+    assert_eq!(
+        client.get_escrow_info(&escrow_id).status,
+        EscrowStatus::Refunded
+    );
+}
+
+#[test]
+fn test_1896_conflicted_arbitrator_rejected_at_creation() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, token) = setup(&env);
+    let recipient = Address::generate(&env);
+    let mut milestones = Vec::new(&env);
+    milestones.push_back(Milestone {
+        id: 1,
+        percentage: 100,
+        release_ledger: 0,
+        is_completed: false,
+        completion_ledger: 0,
+    });
+    // Arbitrator == funder.
+    assert_eq!(
+        client.try_create_escrow(
+            &admin,
+            &recipient,
+            &token,
+            &1_000i128,
+            &milestones,
+            &10_000u64,
+            &admin,
+        ),
+        Err(Ok(VaultError::Unauthorized))
+    );
+    // Arbitrator == recipient.
+    assert_eq!(
+        client.try_create_escrow(
+            &admin,
+            &recipient,
+            &token,
+            &1_000i128,
+            &milestones,
+            &10_000u64,
+            &recipient,
+        ),
+        Err(Ok(VaultError::Unauthorized))
     );
 }
