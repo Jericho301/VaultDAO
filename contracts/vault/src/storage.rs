@@ -258,6 +258,7 @@ pub enum VestingKey {
 pub enum ReserveKey {
     ReservedEscrow(Address),
     ReservedStream(Address),
+    ReservedSubscription(Address),
     /// Tokens held in time-weighted locks, owed back to lockers (#1903)
     ReservedLocks(Address),
     /// Unreleased balance of approved funding rounds (#1901)
@@ -378,6 +379,8 @@ pub enum FeatureKey {
     StreamAutoComplete(u64),
     /// Subscription by ID -> Subscription
     Subscription(u64),
+    /// Prepaid balance held by the vault for a subscription (subscription id) -> i128
+    SubscriptionBalance(u64),
     /// Subscription IDs indexed by subscriber address -> Vec<u64>
     SubscriberIndex(Address),
     /// Reputation decay configuration -> ReputationConfig
@@ -751,6 +754,18 @@ pub fn release_escrow_reserve(env: &Env, token: &Address, amount: i128) {
     adjust_reserve(env, ReserveKey::ReservedEscrow(token.clone()), -amount);
 }
 
+pub fn get_reserved_subscription(env: &Env, token: &Address) -> i128 {
+    get_reserve(env, &ReserveKey::ReservedSubscription(token.clone()))
+}
+
+pub fn reserve_subscription(env: &Env, token: &Address, amount: i128) {
+    adjust_reserve(env, ReserveKey::ReservedSubscription(token.clone()), amount);
+}
+
+pub fn release_subscription_reserve(env: &Env, token: &Address, amount: i128) {
+    adjust_reserve(env, ReserveKey::ReservedSubscription(token.clone()), -amount);
+}
+
 pub fn get_reserved_stream(env: &Env, token: &Address) -> i128 {
     get_reserve(env, &ReserveKey::ReservedStream(token.clone()))
 }
@@ -794,6 +809,7 @@ pub fn get_total_reserved(env: &Env, token: &Address) -> i128 {
     get_reserved_vesting(env, token)
         .saturating_add(get_reserved_escrow(env, token))
         .saturating_add(get_reserved_stream(env, token))
+        .saturating_add(get_reserved_subscription(env, token))
         .saturating_add(get_reserved_locks(env, token))
         .saturating_add(get_reserved_funding(env, token))
         .saturating_add(get_insurance_pool(env, token))
@@ -4125,6 +4141,22 @@ pub fn get_subscription(env: &Env, id: u64) -> Result<Subscription, VaultError> 
         .persistent()
         .get(&FeatureKey::Subscription(id))
         .ok_or(VaultError::SubscriptionNotFound)
+}
+
+/// Prepaid balance the vault holds for a subscription (0 if never funded).
+pub fn get_subscription_balance(env: &Env, id: u64) -> i128 {
+    env.storage()
+        .persistent()
+        .get(&FeatureKey::SubscriptionBalance(id))
+        .unwrap_or(0)
+}
+
+pub fn set_subscription_balance(env: &Env, id: u64, amount: i128) {
+    let key = FeatureKey::SubscriptionBalance(id);
+    env.storage().persistent().set(&key, &amount);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL);
 }
 
 // ============================================================================
