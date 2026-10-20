@@ -517,6 +517,8 @@ pub enum VaultError {
     /// `min_amount_threshold`, or a quiet-hours offset outside one
     /// `QUIET_HOURS_CYCLE`
     InvalidNotificationPrefs = 1164,
+    /// Stream still has unclaimed funds and cannot be closed (Issue #1912)
+    StreamNotFullyClaimed = 1165,
     // Issue #1934: only one recovery proposal may be open at a time
     /// A recovery proposal is already Pending or Approved
     RecoveryAlreadyActive = 1165,
