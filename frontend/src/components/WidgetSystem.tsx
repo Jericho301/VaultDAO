@@ -223,6 +223,9 @@ const WidgetSystem: React.FC<WidgetSystemProps> = ({ onWidgetAdd, onWidgetRemove
               key={widget.id}
               widget={widget}
               onLoad={() => incrementUsage(widget.id)}
+              onSettingsChange={(widgetId, settings) =>
+                setInstalledWidgets(prev => prev.map(w => (w.id === widgetId ? { ...w, settings } : w)))
+              }
             />
           ))}
       </div>
