@@ -258,6 +258,10 @@ pub enum VestingKey {
 pub enum ReserveKey {
     ReservedEscrow(Address),
     ReservedStream(Address),
+    /// Tokens held in time-weighted locks, owed back to lockers (#1903)
+    ReservedLocks(Address),
+    /// Unreleased balance of approved funding rounds (#1901)
+    ReservedFunding(Address),
 }
 
 #[contracttype(export = false)]
@@ -355,6 +359,8 @@ pub enum FeatureKey {
     FundingRound(u64),
     /// Funding round IDs by proposal ID -> Vec<u64>
     ProposalFundingRounds(u64),
+    /// Admin approvals recorded for a pending funding round -> Vec<Address> (#1901)
+    FundingRoundApprovals(u64),
     /// Funding round configuration -> FundingRoundConfig
     FundingRoundConfig,
     /// Batch transaction storage (nested with BatchKey)
@@ -757,12 +763,39 @@ pub fn release_stream_reserve(env: &Env, token: &Address, amount: i128) {
     adjust_reserve(env, ReserveKey::ReservedStream(token.clone()), -amount);
 }
 
+pub fn get_reserved_locks(env: &Env, token: &Address) -> i128 {
+    get_reserve(env, &ReserveKey::ReservedLocks(token.clone()))
+}
+
+pub fn reserve_locks(env: &Env, token: &Address, amount: i128) {
+    adjust_reserve(env, ReserveKey::ReservedLocks(token.clone()), amount);
+}
+
+pub fn release_locks_reserve(env: &Env, token: &Address, amount: i128) {
+    adjust_reserve(env, ReserveKey::ReservedLocks(token.clone()), -amount);
+}
+
+pub fn get_reserved_funding(env: &Env, token: &Address) -> i128 {
+    get_reserve(env, &ReserveKey::ReservedFunding(token.clone()))
+}
+
+pub fn reserve_funding(env: &Env, token: &Address, amount: i128) {
+    adjust_reserve(env, ReserveKey::ReservedFunding(token.clone()), amount);
+}
+
+pub fn release_funding_reserve(env: &Env, token: &Address, amount: i128) {
+    adjust_reserve(env, ReserveKey::ReservedFunding(token.clone()), -amount);
+}
+
 /// Sum of every earmarked balance for `token`: vesting, escrow, stream,
-/// insurance pool, stake pool and collected fees (#1698).
+/// time-weighted locks, funding rounds, insurance pool, stake pool and collected
+/// fees (#1698, #1901, #1903).
 pub fn get_total_reserved(env: &Env, token: &Address) -> i128 {
     get_reserved_vesting(env, token)
         .saturating_add(get_reserved_escrow(env, token))
         .saturating_add(get_reserved_stream(env, token))
+        .saturating_add(get_reserved_locks(env, token))
+        .saturating_add(get_reserved_funding(env, token))
         .saturating_add(get_insurance_pool(env, token))
         .saturating_add(get_stake_pool(env, token))
         .saturating_add(get_fees_collected(env, token))
@@ -3709,7 +3742,6 @@ pub fn get_proposal_funding_rounds(env: &Env, proposal_id: u64) -> Vec<u64> {
         .unwrap_or_else(|| Vec::new(env))
 }
 
-#[allow(dead_code)]
 pub fn add_proposal_funding_round(env: &Env, proposal_id: u64, round_id: u64) {
     let mut rounds = get_proposal_funding_rounds(env, proposal_id);
     rounds.push_back(round_id);
@@ -3730,6 +3762,22 @@ pub fn set_funding_round_config(env: &Env, config: &FundingRoundConfig) {
     env.storage()
         .instance()
         .set(&FeatureKey::FundingRoundConfig, config);
+}
+
+/// Admins who have approved a pending funding round (#1901).
+pub fn get_funding_round_approvals(env: &Env, round_id: u64) -> Vec<Address> {
+    env.storage()
+        .persistent()
+        .get(&FeatureKey::FundingRoundApprovals(round_id))
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+pub fn set_funding_round_approvals(env: &Env, round_id: u64, approvals: &Vec<Address>) {
+    let key = FeatureKey::FundingRoundApprovals(round_id);
+    env.storage().persistent().set(&key, approvals);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, PROPOSAL_TTL / 2, PROPOSAL_TTL);
 }
 
 // ============================================================================

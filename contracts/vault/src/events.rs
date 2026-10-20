@@ -2605,7 +2605,7 @@ pub fn emit_vesting_cancelled(
 // Multi-Phase Execution Events
 // ============================================================================
 
-/// Emit when a single phase of a multi-phase proposal execution completes.
+/// Emit when a phase of a multi-phase proposal execution completes.
 ///
 /// Topics: `("phase_executed", proposal_id)`
 /// Data:   `(phase_index, executor)`
