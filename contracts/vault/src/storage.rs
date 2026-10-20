@@ -25,9 +25,9 @@ use crate::errors::VaultError;
 use crate::types::{
     AuditCheckpoint, AuditEntry, BridgeConfig, CapabilityToken, ClawbackRequest, ClawbackStatus, ColdSignatureRecord,
     ColdSignerConfig, Comment, Config, CostModel, CrossChainProposal, DeadLetterRecord,
-    DelegatedPermission, Delegation, DelegationHistory, DexConfig, Escrow, ExecutionFeeEstimate,
+    DelegatedPermission, Delegation, DelegationHistory, DexConfig, Escrow, EscrowStatus, ExecutionFeeEstimate,
     ExecutionSnapshot, FeeStructure, ForceRotationRequest, FundingRound, FundingRoundConfig,
-    GasConfig, GasPriceOracleConfig, GovernanceProposal, HolidayCalendar, HookEventType,
+    GasConfig, GasPriceOracleConfig, GovernanceProposal, HolidayCalendar, HookEventType, HookFailure,
     HookRegistration, InsuranceClaim, InsuranceConfig, InsuranceVotingConfig, ListMode,
     MergeRecord, MultiPhaseProposal, NotificationPreferences, NotificationPrefs,
     PauseCooldownConfig, PauseState, PermissionGrant, Proposal, ProposalAmendment, ProposalStatus,
@@ -117,6 +117,8 @@ pub enum DataKey {
     StreamRateWindow(u64),
     /// Clawback request by ID -> ClawbackRequest
     ClawbackRequest(u64),
+    /// Whether a voter has voted on a clawback request (request ID, voter) -> bool
+    ClawbackVote(u64, Address),
     /// Next clawback request ID -> u64
     NextClawbackId,
     // ---- Issue #1075: Insurance Claim Governance ----
@@ -221,6 +223,8 @@ pub enum DataKey {
     NextForceRotationId,
     /// Addresses that have voted to reject a proposal -> Vec<Address>
     RejectionVotes(u64),
+    /// Failed hook calls recorded for a proposal -> Vec<HookFailure> (#1892)
+    HookFailures(u64),
 }
 
 #[contracttype(export = false)]
@@ -348,6 +352,8 @@ pub enum FeatureKey {
     RecoveryProposal(u64),
     /// Recovery config change proposal by ID -> RecoveryConfigChangeProposal (Issue #1702)
     RecoveryConfigChangeProposal(u64),
+    /// ID of the most recently initiated recovery proposal -> u64 (Issue #1934)
+    ActiveRecoveryId,
     /// Insurance pool accumulated slashed funds (Token Address) -> i128
     /// Funding round by ID -> FundingRound
     FundingRound(u64),
@@ -680,6 +686,11 @@ pub fn get_vesting_ids_paginated(env: &Env, offset: u64, limit: u64) -> Vec<u64>
     ids
 }
 
+/// One page of vesting schedule IDs in ascending ID order, starting strictly
+/// after `start_after_id` (#1744).
+///
+/// Cursor-based counterpart to `get_vesting_ids_paginated`; pass the last ID
+/// received (or 0 to start from the beginning).
 /// Cursor-based pagination over vesting schedule IDs.
 ///
 /// Seeks directly to the position of `start_after_id` (or the first position
@@ -1094,6 +1105,20 @@ pub fn get_proposal_ids_paginated(env: &Env, offset: u64, limit: u64) -> Vec<u64
     ids
 }
 
+/// Return a page of existing proposal IDs in ascending creation order,
+/// starting strictly after `start_after_id`.
+///
+/// This is the cursor-based counterpart to `get_proposal_ids_paginated`:
+/// callers pass the last ID they received (or 0 to start from the
+/// beginning) and receive the next `limit` IDs. Cursor pagination is
+/// stable under concurrent inserts, unlike offset pagination.
+///
+/// # Arguments
+/// * `start_after_id` - Return IDs strictly greater than this value (0 = from start).
+/// * `limit`          - Maximum number of IDs to return. Capped at 100 internally.
+///
+/// # Returns
+/// A vector of proposal IDs in ascending order.
 /// Binary-search the dense proposal ID index for `id`.
 ///
 /// IDs are assigned sequentially starting at 1, so the dense index is the
@@ -1610,6 +1635,18 @@ pub fn get_recurring_payment_ids_paginated(env: &Env, offset: u64, limit: u64) -
     ids
 }
 
+/// Return a page of existing recurring payment IDs in ascending creation
+/// order, starting strictly after `start_after_id`.
+///
+/// Cursor-based counterpart to `get_recurring_payment_ids_paginated`; pass the
+/// last ID received (or 0 to start from the beginning).
+///
+/// # Arguments
+/// * `start_after_id` - Return IDs strictly greater than this value (0 = from start).
+/// * `limit`          - Maximum number of IDs to return. Capped at 100 internally.
+///
+/// # Returns
+/// A vector of recurring payment IDs in ascending order.
 /// Cursor-based pagination over recurring payment IDs.
 ///
 /// Seeks directly to the position of `start_after_id` (or the first position
@@ -3444,11 +3481,42 @@ pub fn set_escrow(env: &Env, escrow: &Escrow) {
         .extend_ttl(&key, PROPOSAL_TTL / 2, PROPOSAL_TTL);
 }
 
-pub fn get_escrow(env: &Env, id: u64) -> Result<Escrow, VaultError> {
+/// Append a failed hook call to the failure log for its proposal (#1892).
+pub fn add_hook_failure(env: &Env, failure: &HookFailure) {
+    let key = DataKey::HookFailures(failure.proposal_id);
+    let mut failures: Vec<HookFailure> = env
+        .storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or_else(|| Vec::new(env));
+    failures.push_back(failure.clone());
+    env.storage().persistent().set(&key, &failures);
     env.storage()
         .persistent()
+        .extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL);
+}
+
+/// Failed hook calls recorded for a proposal, in the order they occurred (#1892).
+pub fn get_hook_failures(env: &Env, proposal_id: u64) -> Vec<HookFailure> {
+    env.storage()
+        .persistent()
+        .get(&DataKey::HookFailures(proposal_id))
+        .unwrap_or_else(|| Vec::new(env))
+}
+
+pub fn get_escrow(env: &Env, id: u64) -> Result<Escrow, VaultError> {
+    let mut escrow: Escrow = env
+        .storage()
+        .persistent()
         .get(&FeatureKey::Escrow(id))
-        .ok_or(VaultError::ProposalNotFound)
+        .ok_or(VaultError::ProposalNotFound)?;
+    // Escrows disputed before `disputed_at` existed have no recorded dispute
+    // ledger. Backfill from `created_at` so their timeout keeps its old meaning.
+    if escrow.status == EscrowStatus::Disputed && escrow.disputed_at == 0 {
+        escrow.disputed_at = escrow.created_at;
+        set_escrow(env, &escrow);
+    }
+    Ok(escrow)
 }
 
 pub fn get_funder_escrows(env: &Env, funder: &Address) -> Vec<u64> {
@@ -3551,7 +3619,8 @@ pub fn calculate_voting_power(env: &Env, addr: &Address) -> i128 {
 // Recovery
 // ============================================================================
 
-fn get_next_recovery_id(env: &Env) -> u64 {
+/// Next recovery proposal ID. Every ID below this value has been allocated.
+pub fn get_next_recovery_id(env: &Env) -> u64 {
     env.storage()
         .instance()
         .get(&FeatureKey::Counter(CounterKey::Recovery))
@@ -3579,6 +3648,19 @@ pub fn get_recovery_proposal(env: &Env, id: u64) -> Result<RecoveryProposal, Vau
         .persistent()
         .get(&FeatureKey::RecoveryProposal(id))
         .ok_or(VaultError::ProposalNotFound)
+}
+
+/// Most recently initiated recovery proposal ID, if any (Issue #1934).
+pub fn get_active_recovery_id(env: &Env) -> Option<u64> {
+    env.storage()
+        .instance()
+        .get(&FeatureKey::ActiveRecoveryId)
+}
+
+pub fn set_active_recovery_id(env: &Env, id: u64) {
+    env.storage()
+        .instance()
+        .set(&FeatureKey::ActiveRecoveryId, &id);
 }
 
 // ============================================================================
@@ -3860,6 +3942,23 @@ pub fn get_clawback_request(env: &Env, id: u64) -> Result<ClawbackRequest, Vault
 pub fn set_clawback_request(env: &Env, req: &ClawbackRequest) {
     let key = DataKey::ClawbackRequest(req.id);
     env.storage().persistent().set(&key, req);
+}
+
+/// Returns true if `voter` has already voted on this clawback request.
+pub fn has_voted_on_clawback(env: &Env, id: u64, voter: &Address) -> bool {
+    env.storage()
+        .persistent()
+        .get(&DataKey::ClawbackVote(id, voter.clone()))
+        .unwrap_or(false)
+}
+
+/// Record that `voter` has voted on this clawback request.
+pub fn record_clawback_vote(env: &Env, id: u64, voter: &Address) {
+    let key = DataKey::ClawbackVote(id, voter.clone());
+    env.storage().persistent().set(&key, &true);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL);
 }
 
 /// Increment and return the next clawback ID.
@@ -4608,9 +4707,22 @@ pub fn get_tag_index(env: &Env, tag: &Symbol) -> Vec<u64> {
 
 /// Derive a stable u64 hash from a Symbol for use as a DataKey discriminant.
 /// Uses the SHA-256 of the symbol's string bytes (first 8 bytes, little-endian).
-fn symbol_to_u64_key(env: &Env, tag: &Symbol) -> u64 {
+pub fn symbol_to_u64_key(env: &Env, tag: &Symbol) -> u64 {
     let tag_bytes = tag.clone().to_xdr(env);
     let hash = env.crypto().sha256(&tag_bytes);
+    let hash_bytes = hash.to_array();
+    u64::from_le_bytes(hash_bytes[0..8].try_into().unwrap())
+}
+
+/// Fingerprint of a configuration setter's full argument list, used as the
+/// audit entry target so the chain commits to the parameters that were
+/// written without storing them on-chain (#1938).
+///
+/// Hashes the XDR of every argument. Only the first 8 bytes of the SHA-256
+/// digest are kept, matching the other audit targets.
+pub fn args_fingerprint(env: &Env, args: Vec<soroban_sdk::Val>) -> u64 {
+    let args_bytes = args.to_xdr(env);
+    let hash = env.crypto().sha256(&args_bytes);
     let hash_bytes = hash.to_array();
     u64::from_le_bytes(hash_bytes[0..8].try_into().unwrap())
 }
