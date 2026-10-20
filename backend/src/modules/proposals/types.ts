@@ -257,6 +257,18 @@ export interface ProposalActivityPersistence {
   saveBatch(records: ProposalActivityRecord[]): Promise<void>;
   getByProposalId(proposalId: string): Promise<ProposalActivityRecord[]>;
   getByContractId(contractId: string): Promise<ProposalActivityRecord[]>;
+  /**
+   * Look up activity records by their transaction hash for a contract.
+   *
+   * Adapters that maintain a hash index should implement this so callers can
+   * avoid scanning a contract's entire activity history. It is optional so
+   * third-party adapters keep working; callers fall back to
+   * `getByContractId` when it is absent.
+   */
+  getByTransactionHash?(
+    contractId: string,
+    txHash: string,
+  ): Promise<ProposalActivityRecord[]>;
   getSummary(proposalId: string): Promise<ProposalActivitySummary | null>;
 }
 
@@ -299,5 +311,7 @@ export interface SyncProposalActivityPersistence {
   saveBatch(activities: Omit<ProposalActivity, "id">[]): ProposalActivity[];
   getByProposalId(proposalId: string): ProposalActivity[];
   getByContractId(contractId: string): ProposalActivity[];
+  /** Look up activity records by their transaction hash for a contract. */
+  getByTransactionHash?(contractId: string, txHash: string): ProposalActivity[];
   getSummary(proposalId: string): ProposalActivitySyncSummary | null;
 }
