@@ -50,7 +50,7 @@ use types::{
     RecurringStatus, Reputation, ReputationConfig, RetryConfig, RetryState, Role, RoleAssignment,
     ScheduledTransferConfig, ScopedDelegation, SignerParticipationScore, SignerTier, StakingConfig,
     StreamRateWindow, StreamStatus, StreamingPayment, Subscription, SubscriptionStatus,
-    SubscriptionTier, SwapProposal, SwapResult, TemplateFeeTier, TemplateOverrides,
+    ExpiryBatch, SubscriptionTier, SwapProposal, SwapResult, TemplateFeeTier, TemplateOverrides,
     ThresholdStrategy, TokenSpendingConfig, TransferDetails, VaultAction, VaultMetrics,
     VaultOracleConfig, VaultPriceData, VaultTemplate, VelocityConfig, VestingSchedule, VoteChoice,
     VoteWeight, VotingStrategy, WhitelistEntry,
@@ -18044,10 +18044,14 @@ impl VaultDAO {
         // Check if grace period has lapsed ? expire and reject
         let grace_deadline = sub.next_renewal_ledger + sub.grace_period_ledgers;
         if current_ledger > grace_deadline {
+            // Persist the expiry and return Ok: an Err would roll the write back.
+            // No payment is taken; callers must check the status to see the result.
+            // auto_renew is kept so reactivation restores the subscriber's choice.
             sub.status = SubscriptionStatus::Expired;
             storage::set_subscription(&env, &sub);
+            storage::extend_instance_ttl(&env);
             events::emit_subscription_expired(&env, subscription_id);
-            return Err(VaultError::SubscriptionAlreadyExpired);
+            return Ok(());
         }
 
         // Only the subscriber can renew unless auto_renew is enabled.
@@ -18227,10 +18231,11 @@ impl VaultDAO {
         Ok(())
     }
 
-    /// Upgrade (or downgrade) a subscription tier and amount.
+    /// Upgrade a subscription tier and amount.
     ///
-    /// Only the subscriber may call this. The new amount takes effect on the
-    /// next renewal; no immediate payment is made.
+    /// Only the subscriber may call this. The price difference for the rest of
+    /// the current period is charged immediately and paid to the provider.
+    /// Downgrades and no-op changes are rejected with `InvalidSubscriptionChange`.
     pub fn upgrade_subscription(
         env: Env,
         subscriber: Address,
@@ -18253,6 +18258,35 @@ impl VaultDAO {
         }
 
         let old_tier = sub.tier.clone();
+        let old_amount = sub.amount_per_period;
+
+        // Upgrades only: downgrades must go through the grace-period flow.
+        let tier_lowered = (new_tier.clone() as u32) < (old_tier.clone() as u32);
+        if tier_lowered || new_amount_per_period < old_amount {
+            return Err(VaultError::InvalidSubscriptionChange);
+        }
+        if new_tier == old_tier && new_amount_per_period == old_amount {
+            return Err(VaultError::InvalidSubscriptionChange);
+        }
+
+        // Prorate the price difference over the remaining part of the period.
+        let diff = new_amount_per_period - old_amount;
+        if diff > 0 {
+            let current_ledger = env.ledger().sequence() as u64;
+            let remaining = sub
+                .next_renewal_ledger
+                .saturating_sub(current_ledger)
+                .min(sub.interval_ledgers);
+            let charge = diff
+                .checked_mul(remaining as i128)
+                .ok_or(VaultError::InvalidAmount)?
+                / sub.interval_ledgers as i128;
+            if charge > 0 {
+                token::transfer_to_vault(&env, &sub.token, &subscriber, charge);
+                token::transfer(&env, &sub.token, &sub.service_provider, charge);
+            }
+        }
+
         sub.tier = new_tier.clone();
         sub.amount_per_period = new_amount_per_period;
 
@@ -18280,6 +18314,16 @@ impl VaultDAO {
         storage::get_subscriber_index(&env, &subscriber)
     }
 
+    /// Expire overdue subscriptions in one bounded page of IDs.
+    ///
+    /// Scans IDs from `start_id` (0 means 1) for at most `max_scan` IDs
+    /// (0 or anything above 100 means 100). Both `Active` and `Paused`
+    /// subscriptions past their grace deadline are expired. Emits
+    /// `subscription_expired` per expiry, one `subscription_expiry_batch`
+    /// summary, and a `SubscriptionsExpired` audit entry.
+    ///
+    /// Permissionless: anyone may call this to prevent griefing by inaction.
+    /// Call again with `start_id = next_cursor` until `done` is true.
     /// Scan up to `max_scan` subscription IDs starting at `start_id` and expire
     /// any Active or Paused subscription that is past its grace deadline.
     /// Permissionless ? anyone may call this to prevent griefing by inaction.
@@ -18295,6 +18339,7 @@ impl VaultDAO {
         caller: Address,
         start_id: u64,
         max_scan: u32,
+    ) -> ExpiryBatch {
     ) -> Result<(u32, u64), VaultError> {
         caller.require_auth();
         if max_scan == 0 {
@@ -18302,6 +18347,17 @@ impl VaultDAO {
         }
         let current_ledger = env.ledger().sequence() as u64;
         let next_id = storage::get_next_subscription_id(&env);
+
+        let from_id = if start_id == 0 { 1 } else { start_id };
+        let limit = if max_scan == 0 || max_scan > 100 {
+            100
+        } else {
+            max_scan as u64
+        };
+        let to_id = from_id.saturating_add(limit).min(next_id);
+
+        let mut expired_count: u32 = 0;
+        for id in from_id..to_id {
         let first = start_id.max(1);
         let end = first.saturating_add(max_scan as u64).min(next_id);
         let mut expired_count: u32 = 0;
@@ -18318,13 +18374,27 @@ impl VaultDAO {
             if current_ledger > grace_deadline {
                 let mut expired_sub = sub;
                 expired_sub.status = SubscriptionStatus::Expired;
+                expired_sub.paused_at_ledger = 0;
                 storage::set_subscription(&env, &expired_sub);
                 events::emit_subscription_expired(&env, id);
                 expired_count += 1;
             }
         }
 
+        events::emit_subscription_expiry_batch(&env, from_id, to_id, expired_count);
+        storage::create_audit_entry(
+            &env,
+            AuditAction::SubscriptionsExpired,
+            &caller,
+            from_id,
+        );
         storage::extend_instance_ttl(&env);
+
+        ExpiryBatch {
+            expired_count,
+            next_cursor: to_id,
+            done: to_id >= next_id,
+        }
         let next_cursor = if end >= next_id { 0 } else { end };
         Ok((expired_count, next_cursor))
     }
