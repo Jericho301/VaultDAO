@@ -8,7 +8,11 @@ use crate::types::{
     InitConfig, RetryConfig, ThresholdStrategy, TimeWeightedConfig, VelocityConfig,
 };
 use crate::{VaultDAO, VaultDAOClient};
-use soroban_sdk::{testutils::Address as _, token::StellarAssetClient, Address, Env, Vec};
+use soroban_sdk::{
+    testutils::{Address as _, Ledger as _},
+    token::StellarAssetClient,
+    Address, Env, Symbol, Vec,
+};
 
 const LOCK_DURATION: u64 = 30 * 17_280;
 
@@ -118,9 +122,10 @@ fn test_unsupported_governance_token_cannot_be_locked() {
     env.mock_all_auths();
     let (client, admin, _gov_token) = setup(&env);
 
-    // Governance token pointed at a token the vault does not support
+    // Governance token pointed at a token the vault does not support is rejected
+    // at configuration time (#1904), so the previous config keeps applying.
     let unsupported = new_token(&env);
-    client.set_time_weighted_config(
+    let config_result = client.try_set_time_weighted_config(
         &admin,
         &TimeWeightedConfig {
             enabled: true,
@@ -128,6 +133,8 @@ fn test_unsupported_governance_token_cannot_be_locked() {
             ..TimeWeightedConfig::default()
         },
     );
+    assert_eq!(config_result, Err(Ok(VaultError::TokenNotSupported)));
+
     let owner = Address::generate(&env);
     StellarAssetClient::new(&env, &unsupported).mint(&owner, &1_000);
 
@@ -136,23 +143,26 @@ fn test_unsupported_governance_token_cannot_be_locked() {
 }
 
 #[test]
-fn test_no_governance_token_rejects_all_locks() {
+fn test_enabling_without_governance_token_is_rejected() {
     let env = Env::default();
     env.mock_all_auths();
     let (client, admin, gov_token) = setup(&env);
 
-    client.set_time_weighted_config(
+    // Enabling without a governance token is rejected at configuration time (#1904)
+    let config_result = client.try_set_time_weighted_config(
         &admin,
         &TimeWeightedConfig {
             enabled: true,
             ..TimeWeightedConfig::default()
         },
     );
-    let owner = Address::generate(&env);
-    StellarAssetClient::new(&env, &gov_token).mint(&owner, &1_000);
+    assert_eq!(config_result, Err(Ok(VaultError::TokenNotSupported)));
 
-    let result = client.try_lock_tokens(&owner, &gov_token, &1_000, &LOCK_DURATION);
-    assert_eq!(result, Err(Ok(VaultError::TokenNotSupported)));
+    // The rejected update leaves the previous, valid configuration in force
+    assert_eq!(
+        client.get_time_weighted_config().governance_token,
+        Some(gov_token)
+    );
 }
 
 #[test]
@@ -170,4 +180,110 @@ fn test_governance_token_lock_grants_voting_power() {
     assert_eq!(lock.token, gov_token);
     let baseline = client.get_voting_power(&Address::generate(&env));
     assert!(client.get_voting_power(&owner) > baseline);
+}
+
+// ============================================================================
+// Issue #1905: lock_tokens, extend_lock and unlock_tokens must honour the pause
+//
+// Policy: while the vault is paused, deposits (`lock_tokens`) and lock
+// extensions (`extend_lock`) are refused so no new voting power enters during
+// an incident. Normal `unlock_tokens` after expiry stays available so users can
+// always withdraw funds that are already matured.
+// ============================================================================
+
+/// Pauses the vault through the emergency signer.
+fn pause(env: &Env, client: &VaultDAOClient<'_>, admin: &Address) {
+    let emergency = Address::generate(env);
+    let mut emergency_signers = Vec::new(env);
+    emergency_signers.push_back(emergency.clone());
+    emergency_signers.push_back(Address::generate(env));
+    client.configure_emergency(admin, &emergency_signers, &i128::MAX);
+    client.pause_vault(&emergency, &Symbol::new(env, "exploit"));
+    assert!(client.get_pause_state().is_paused);
+}
+
+/// Locks `amount` of the governance token for `owner` before any pause.
+fn lock_before_pause(
+    env: &Env,
+    client: &VaultDAOClient<'_>,
+    gov_token: &Address,
+    owner: &Address,
+    amount: i128,
+) {
+    StellarAssetClient::new(env, gov_token).mint(owner, &amount);
+    client.lock_tokens(owner, gov_token, &amount, &LOCK_DURATION);
+}
+
+#[test]
+fn test_paused_vault_rejects_lock_tokens() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, gov_token) = setup(&env);
+    pause(&env, &client, &admin);
+
+    let owner = Address::generate(&env);
+    StellarAssetClient::new(&env, &gov_token).mint(&owner, &1_000);
+
+    let result = client.try_lock_tokens(&owner, &gov_token, &1_000, &LOCK_DURATION);
+    assert_eq!(result, Err(Ok(VaultError::VaultPaused)));
+    assert!(client.get_token_lock(&owner).is_none());
+    assert_eq!(
+        soroban_sdk::token::Client::new(&env, &gov_token).balance(&owner),
+        1_000
+    );
+}
+
+#[test]
+fn test_paused_vault_rejects_extend_lock() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, gov_token) = setup(&env);
+    let owner = Address::generate(&env);
+    lock_before_pause(&env, &client, &gov_token, &owner, 1_000);
+    let unlock_at_before = client.get_token_lock(&owner).unwrap().unlock_at;
+
+    pause(&env, &client, &admin);
+
+    let result = client.try_extend_lock(&owner, &LOCK_DURATION);
+    assert_eq!(result, Err(Ok(VaultError::VaultPaused)));
+    assert_eq!(
+        client.get_token_lock(&owner).unwrap().unlock_at,
+        unlock_at_before
+    );
+}
+
+#[test]
+fn test_paused_vault_allows_unlock_after_expiry() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, gov_token) = setup(&env);
+    let owner = Address::generate(&env);
+    lock_before_pause(&env, &client, &gov_token, &owner, 1_000);
+
+    pause(&env, &client, &admin);
+    env.ledger()
+        .with_mut(|li| li.sequence_number += LOCK_DURATION as u32 + 1);
+
+    let returned = client.unlock_tokens(&owner);
+    assert_eq!(returned, 1_000);
+    assert_eq!(
+        soroban_sdk::token::Client::new(&env, &gov_token).balance(&owner),
+        1_000
+    );
+    assert!(!client.get_token_lock(&owner).unwrap().is_active);
+}
+
+#[test]
+fn test_paused_vault_unlock_before_expiry_still_times_out() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (client, admin, gov_token) = setup(&env);
+    let owner = Address::generate(&env);
+    lock_before_pause(&env, &client, &gov_token, &owner, 1_000);
+
+    pause(&env, &client, &admin);
+
+    // Normal unlock is not a bypass: the lock period still has to elapse.
+    let result = client.try_unlock_tokens(&owner);
+    assert_eq!(result, Err(Ok(VaultError::TimelockNotExpired)));
 }

@@ -246,6 +246,7 @@ export enum FundingMilestoneStatus {
   Pending = "Pending",
   Submitted = "Submitted",
   Verified = "Verified",
+  Released = "Released",
   Rejected = "Rejected",
 }
 
@@ -388,6 +389,15 @@ export enum VaultErrorCode {
   // 6xx — Token
   TransferFailed = 600,
   InsufficientBalance = 601,
+
+  // Capability tokens
+  CapabilityNotFound = 630,
+  CapabilityExpired = 631,
+  CapabilityRevoked = 632,
+  CapabilityMaxUsesReached = 633,
+  CapabilityNotGranted = 634,
+  CapabilityAlreadyExists = 635,
+  CapabilityInvalid = 636,
 
   // 11xx — Streams, vesting and locks (contract codes, Issue #1739)
   StreamNotActive = 1160,
@@ -599,4 +609,3 @@ export interface StateDiff {
   /** Detailed list of all state changes. */
   changes: StateChangeEntry[];
 }
-

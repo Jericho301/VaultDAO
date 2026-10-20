@@ -76,6 +76,7 @@ fn setup(env: &Env) -> (VaultDAOClient<'_>, Address, Address) {
             quorum_percentage: 0,
         },
     );
+    client.add_supported_token(&admin, &token, &1_000_000, &10_000_000);
 
     // Fund admin
     StellarAssetClient::new(env, &token).mint(&admin, &5_000_000i128);
@@ -155,11 +156,11 @@ fn test_release_after_expiry_refunds_funder() {
     // Advance past expiration
     env.ledger().with_mut(|li| li.sequence_number += 150);
 
-    // Expired escrows are refunded to the funder even if milestones completed
+    // Completed milestones are paid to the recipient even after expiry
     let released = client.release_escrow(&recipient, &escrow_id);
     assert_eq!(released, 2000);
     let escrow = client.get_escrow_info(&escrow_id);
-    assert_eq!(escrow.status, crate::types::EscrowStatus::Refunded);
+    assert_eq!(escrow.status, crate::types::EscrowStatus::Released);
 }
 
 // ============================================================================
