@@ -22,6 +22,7 @@ This document covers production hardening, monitoring, backup strategy, and inci
    - [API Key Rotation](#5-api-key-rotation-no-restart-required)
    - [Communication Template](#6-communication-template)
    - [High Error Rate Response](#7-high-error-rate-response)
+   - [Guardian Wallet Recovery](#8-guardian-wallet-recovery)
 10. [Rollback Procedure for Contract Upgrades](#rollback-procedure-for-contract-upgrades)
 
 ---
@@ -782,6 +783,51 @@ curl -s http://localhost:8787/api/v1/rpc/pool/status \
 **Prevention:**
 - Keep canary/staged rollouts for backend deploys so a bad release affects a small fraction of traffic first.
 - Ensure `STELLAR_RPC_URLS` lists more than one provider so a single RPC outage doesn't take down the whole pool.
+
+### 8. Guardian Wallet Recovery
+
+Guardian-based recovery lets a vault replace its signers and threshold when keys
+are lost or compromised. It is deliberately guarded: the recovery configuration
+changes through multisig governance, and executing a recovery requires guardian
+approval plus a time delay during which it can be cancelled.
+
+**Symptoms:**
+- `recovery_proposed` / `recovery_approved` events fire when no handover is planned
+- `recovery_config_proposal_created` proposes guardian addresses you do not recognise
+- `recovery_executed` fires unexpectedly, or `proposals_invalidated_by_recovery` resets in-flight proposals
+
+**Triage Steps:**
+
+```bash
+# 1. Inspect the recovery config and a specific proposal
+stellar contract invoke --id $CONTRACT_ID --network mainnet -- get_recovery_config
+stellar contract invoke --id $CONTRACT_ID --network mainnet -- get_recovery_proposal --id $RECOVERY_ID
+
+# 2. Compare new_signers/new_threshold against the expected handover.
+#    Unknown addresses ⇒ assume hostile.
+
+# 3. Contact every guardian out-of-band and confirm whether they approved.
+#    Do NOT trust in-band messages.
+```
+
+**Mitigation:**
+- **Hostile and `Pending`:** any guardian can call `cancel_recovery` immediately.
+- **Hostile and `Approved`:** a guardian who did **not** approve can call
+  `cancel_recovery`; if none is available, pause the vault and escalate.
+- **Legitimate:** verify the new signers and threshold, let the delay elapse,
+  then execute.
+- After a hostile event, rotate guardian and signer keys and re-run the
+  governance config flow with a longer delay.
+
+**Prevention:**
+- Alert on all `recovery_*` events; they should be rare and always expected.
+- Keep `threshold < guardians.length` so approved recoveries remain cancellable.
+- Prefer a delay of ≥ 3 days (~51,840 ledgers) and keep guardians separate from
+  the vault's signer set.
+
+**See:** [Wallet recovery guide](../guides/WALLET_RECOVERY.md) for the full
+lifecycle, parameter choices, failure modes, and the complete incident-response
+checklist.
 
 ---
 

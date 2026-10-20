@@ -62,6 +62,8 @@ fn setup(env: &Env) -> (VaultDAOClient<'_>, Address, Address, Address) {
         },
     );
 
+    client.add_supported_token(&admin, &token, &1_000_000i128, &5_000_000i128);
+
     (client, admin, token_admin, token)
 }
 
@@ -823,6 +825,9 @@ fn test_expire_overdue_subscriptions_batch() {
 
     let expired = client.expire_overdue_subscriptions(&subscriber, &1u64, &100u32);
     assert_eq!(expired.expired_count, 2);
+    let (expired, next_cursor) = client.expire_overdue_subscriptions(&subscriber, &1u64, &100u32);
+    assert_eq!(expired, 2);
+    assert_eq!(next_cursor, 0);
 
     assert_eq!(
         client.get_subscription(&id1).status,
@@ -877,6 +882,13 @@ fn test_reactivate_expired_subscription() {
 
 #[test]
 fn test_renew_after_grace_period_persists_expiry() {
+fn test_reactivate_preserves_manual_renew_setting() {
+// ============================================================================
+// Issue #1920: Prepaid subscription balance (keeper renewals without subscriber auth)
+// ============================================================================
+
+#[test]
+fn test_keeper_renews_from_prepaid_balance_without_subscriber_auth() {
     let env = Env::default();
     env.mock_all_auths();
 
@@ -885,6 +897,9 @@ fn test_renew_after_grace_period_persists_expiry() {
     let provider = Address::generate(&env);
 
     fund_subscriber(&env, &token, &subscriber, 100_000);
+    let keeper = Address::generate(&env);
+
+    fund_subscriber(&env, &token, &subscriber, 10_000);
 
     let id = client.create_subscription(
         &subscriber,
@@ -969,12 +984,113 @@ fn test_upgrade_prorates_charge_near_end_of_period() {
 
 #[test]
 fn test_downgrade_via_upgrade_is_rejected() {
+    client.expire_overdue_subscriptions(&subscriber, &1u64, &100u32);
+
+    client.reactivate_subscription(&subscriber, &id);
+    let reactivated = client.get_subscription(&id);
+    assert_eq!(reactivated.status, SubscriptionStatus::Active);
+    assert!(!reactivated.auto_renew);
+}
+
+#[test]
+fn test_create_subscription_unsupported_token_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, token_admin, _token) = setup(&env);
+    let subscriber = Address::generate(&env);
+    let provider = Address::generate(&env);
+    let unsupported = env
+        .register_stellar_asset_contract_v2(token_admin)
+        .address();
+    fund_subscriber(&env, &unsupported, &subscriber, 100_000);
+
+    let res = client.try_create_subscription(
+        &subscriber,
+        &provider,
+        &SubscriptionTier::Basic,
+        &unsupported,
+        &100i128,
+        &500u64,
+        &false,
+        &50u64,
+    );
+    assert_eq!(res, Err(Ok(VaultError::TokenNotSupported)));
+}
+
+#[test]
+fn test_expire_overdue_subscriptions_paginates() {
     let env = Env::default();
     env.mock_all_auths();
 
     let (client, _admin, _token_admin, token) = setup(&env);
     let subscriber = Address::generate(&env);
     let provider = Address::generate(&env);
+
+    fund_subscriber(&env, &token, &subscriber, 100_000);
+
+    let mut last_id = 0u64;
+    for _ in 0..3 {
+        last_id = client.create_subscription(
+            &subscriber,
+            &provider,
+            &SubscriptionTier::Basic,
+            &token,
+            &100i128,
+            &500u64,
+            &false,
+            &50u64,
+        );
+    }
+
+    let sub = client.get_subscription(&last_id);
+    let advance = sub.next_renewal_ledger + 51 - env.ledger().sequence() as u64;
+    env.ledger()
+        .with_mut(|l| l.sequence_number += advance as u32);
+
+    // First page scans IDs 1..=2 only.
+    let (expired, cursor) = client.expire_overdue_subscriptions(&subscriber, &1u64, &2u32);
+    assert_eq!(expired, 2);
+    assert_eq!(cursor, 3);
+
+    // Second page picks up from the cursor and finishes the range.
+    let (expired, cursor) = client.expire_overdue_subscriptions(&subscriber, &cursor, &2u32);
+    assert_eq!(expired, 1);
+    assert_eq!(cursor, 0);
+}
+
+#[test]
+fn test_expire_overdue_subscriptions_expires_paused() {
+        &true,
+        &200u64, // grace period
+    );
+    client.top_up_subscription(&subscriber, &id, &300i128);
+    assert_eq!(client.get_subscription_balance(&id), 300);
+
+    let sub = client.get_subscription(&id);
+    let advance = sub.next_renewal_ledger - env.ledger().sequence() as u64;
+    env.ledger()
+        .with_mut(|l| l.sequence_number += advance as u32);
+
+    client.renew_subscription(&keeper, &id);
+
+    assert_eq!(client.get_subscription(&id).total_payments, 2);
+    assert_eq!(client.get_subscription_balance(&id), 200);
+    assert!(env
+        .auths()
+        .iter()
+        .all(|(authorized, _)| *authorized != subscriber));
+}
+
+#[test]
+fn test_keeper_renewal_fails_when_prepaid_balance_short() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, _token_admin, token) = setup(&env);
+    let subscriber = Address::generate(&env);
+    let provider = Address::generate(&env);
+    let keeper = Address::generate(&env);
 
     fund_subscriber(&env, &token, &subscriber, 10_000);
 
@@ -998,6 +1114,28 @@ fn test_downgrade_via_upgrade_is_rejected() {
 
 #[test]
 fn test_reactivate_preserves_manual_renew_setting() {
+        &SubscriptionTier::Basic,
+        &token,
+        &100i128,
+        &500u64,
+        &true,
+        &200u64, // grace period
+    );
+    client.top_up_subscription(&subscriber, &id, &50i128);
+
+    let sub = client.get_subscription(&id);
+    let advance = sub.next_renewal_ledger - env.ledger().sequence() as u64;
+    env.ledger()
+        .with_mut(|l| l.sequence_number += advance as u32);
+
+    let result = client.try_renew_subscription(&keeper, &id);
+    assert_eq!(result, Err(Ok(VaultError::InsufficientBalance)));
+    assert_eq!(client.get_subscription_balance(&id), 50);
+    assert_eq!(client.get_subscription(&id).total_payments, 1);
+}
+
+#[test]
+fn test_top_up_and_withdraw_subscription_balance() {
     let env = Env::default();
     env.mock_all_auths();
 
@@ -1007,6 +1145,9 @@ fn test_reactivate_preserves_manual_renew_setting() {
     let other = Address::generate(&env);
 
     fund_subscriber(&env, &token, &subscriber, 100_000);
+
+    fund_subscriber(&env, &token, &subscriber, 100_000);
+    fund_subscriber(&env, &token, &subscriber, 10_000);
 
     let id = client.create_subscription(
         &subscriber,
@@ -1018,6 +1159,7 @@ fn test_reactivate_preserves_manual_renew_setting() {
         &false,
         &50u64,
     );
+    client.pause_subscription(&subscriber, &id);
 
     let sub = client.get_subscription(&id);
     let advance = sub.next_renewal_ledger + 51 - env.ledger().sequence() as u64;
@@ -1037,6 +1179,44 @@ fn test_reactivate_preserves_manual_renew_setting() {
 
 #[test]
 fn test_expire_overdue_paginates_and_handles_mixed_statuses() {
+
+    let (expired, _) = client.expire_overdue_subscriptions(&subscriber, &1u64, &100u32);
+    assert_eq!(expired, 1);
+    assert_eq!(
+        client.get_subscription(&id).status,
+        SubscriptionStatus::Expired
+    );
+}
+
+#[test]
+fn test_expire_overdue_subscriptions_zero_scan_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let (client, _admin, _token_admin, _token) = setup(&env);
+    let subscriber = Address::generate(&env);
+
+    let res = client.try_expire_overdue_subscriptions(&subscriber, &1u64, &0u32);
+    assert_eq!(res, Err(Ok(VaultError::InvalidAmount)));
+        &true,
+        &200u64,
+    );
+    client.top_up_subscription(&subscriber, &id, &300i128);
+
+    let token_client = soroban_sdk::token::Client::new(&env, &token);
+    let before_withdraw = token_client.balance(&subscriber);
+
+    client.withdraw_subscription_balance(&subscriber, &id, &120i128);
+    assert_eq!(client.get_subscription_balance(&id), 180);
+    assert_eq!(token_client.balance(&subscriber), before_withdraw + 120);
+
+    let over = client.try_withdraw_subscription_balance(&subscriber, &id, &500i128);
+    assert_eq!(over, Err(Ok(VaultError::InsufficientBalance)));
+    assert_eq!(client.get_subscription_balance(&id), 180);
+}
+
+#[test]
+fn test_top_up_by_non_subscriber_fails() {
     let env = Env::default();
     env.mock_all_auths();
 
@@ -1063,6 +1243,12 @@ fn test_expire_overdue_paginates_and_handles_mixed_statuses() {
     let paused_overdue = short(&client); // 2
     let cancelled = short(&client); // 3
     let long = client.create_subscription(
+    let stranger = Address::generate(&env);
+
+    fund_subscriber(&env, &token, &subscriber, 10_000);
+    fund_subscriber(&env, &token, &stranger, 10_000);
+
+    let id = client.create_subscription(
         &subscriber,
         &provider,
         &SubscriptionTier::Basic,
@@ -1115,4 +1301,12 @@ fn test_expire_overdue_paginates_and_handles_mixed_statuses() {
         client.get_subscription(&long).status,
         SubscriptionStatus::Active
     );
+        &500u64,
+        &true,
+        &200u64,
+    );
+
+    let result = client.try_top_up_subscription(&stranger, &id, &100i128);
+    assert_eq!(result, Err(Ok(VaultError::NotSubscriberOrAdmin)));
+    assert_eq!(client.get_subscription_balance(&id), 0);
 }
