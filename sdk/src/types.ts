@@ -60,6 +60,17 @@ export interface InitConfig {
 /**
  * Active vault configuration returned by the contract.
  */
+/** Emergency pause state of a vault, as returned by `get_pause_state`. */
+export interface PauseState {
+  isPaused: boolean;
+  /** Address of the emergency signer that paused the vault, or null when not paused. */
+  pausedBy: string | null;
+  /** Ledger sequence at which the vault was paused. */
+  pausedAtLedger: number;
+  /** Reason code supplied when the vault was paused. */
+  cause: string;
+}
+
 export interface VaultConfig {
   signers: string[];
   threshold: number;
@@ -235,6 +246,7 @@ export enum FundingMilestoneStatus {
   Pending = "Pending",
   Submitted = "Submitted",
   Verified = "Verified",
+  Released = "Released",
   Rejected = "Rejected",
 }
 
@@ -377,6 +389,15 @@ export enum VaultErrorCode {
   // 6xx — Token
   TransferFailed = 600,
   InsufficientBalance = 601,
+
+  // Capability tokens
+  CapabilityNotFound = 630,
+  CapabilityExpired = 631,
+  CapabilityRevoked = 632,
+  CapabilityMaxUsesReached = 633,
+  CapabilityNotGranted = 634,
+  CapabilityAlreadyExists = 635,
+  CapabilityInvalid = 636,
 
   // 11xx — Streams, vesting and locks (contract codes, Issue #1739)
   StreamNotActive = 1160,
@@ -522,6 +543,11 @@ export interface SdkOptions {
   contractId: string;
   /** Stellar RPC endpoint URL. */
   rpcUrl: string;
+  /**
+   * Allow plain `http://` RPC URLs. Defaults to `false`, except for localhost
+   * URLs (e.g. a Quickstart node), where it defaults to `true`.
+   */
+  allowHttp?: boolean;
   /** Stellar network passphrase. */
   networkPassphrase: string;
   /**

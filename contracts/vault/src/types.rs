@@ -109,6 +109,18 @@ pub struct InitConfig {
     pub upgrade_timelock_delay: u64,
 }
 
+/// Result of one bounded page of `expire_overdue_subscriptions` (#1924).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExpiryBatch {
+    /// Number of subscriptions expired in this page.
+    pub expired_count: u32,
+    /// Pass as `start_id` to continue scanning from the next page.
+    pub next_cursor: u64,
+    /// True when the scan has reached the end of the subscription IDs.
+    pub done: bool,
+}
+
 /// Vault configuration
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1410,6 +1422,52 @@ pub enum AuditAction {
     PhaseExecuted = 29,
     /// A single phase of a multi-phase proposal failed to execute.
     PhaseFailed = 30,
+    /// A bounded page of overdue subscriptions was expired (#1924).
+    SubscriptionsExpired = 31,
+    /// A capability token was granted.
+    CapabilityGranted = 31,
+    /// A capability token was revoked.
+    CapabilityRevoked = 32,
+    /// Vault paused by an emergency signer or the circuit breaker (#1937).
+    /// `target` is the fingerprint of the pause cause.
+    VaultPaused = 31,
+    /// Vault unpaused by an emergency signer (#1937).
+    /// `target` is the number of ledgers the vault was paused.
+    VaultUnpaused = 32,
+    /// Supported-token list or per-token limits changed (#1938).
+    /// `target` is a fingerprint of the setter arguments.
+    TokenConfigUpdated = 33,
+    /// Fee structure changed (#1938). `target` is a fingerprint of the arguments.
+    FeeConfigUpdated = 34,
+    /// Insurance configuration changed (#1938). `target` is a fingerprint of the arguments.
+    InsuranceConfigUpdated = 35,
+    /// Signer quorum changed (#1938). `target` is a fingerprint of the arguments.
+    QuorumUpdated = 36,
+    /// Voting strategy changed (#1938). `target` is a fingerprint of the arguments.
+    VotingStrategyUpdated = 37,
+    /// Threshold strategy changed (#1938). `target` is a fingerprint of the arguments.
+    ThresholdStrategyUpdated = 38,
+    /// DEX configuration changed (#1938). `target` is a fingerprint of the arguments.
+    DexConfigUpdated = 39,
+    /// Time-weighted voting configuration changed (#1938).
+    /// `target` is a fingerprint of the arguments.
+    TimeWeightedConfigUpdated = 40,
+    /// Permission granted to an address (#1938). `target` is a fingerprint of the arguments.
+    PermissionGranted = 41,
+    /// Permission revoked from an address (#1938). `target` is a fingerprint of the arguments.
+    PermissionRevoked = 42,
+    /// Signer tier changed (#1938). `target` is a fingerprint of the arguments.
+    SignerTierUpdated = 43,
+    /// Pre- or post-execution hook registered (#1938). `target` is a fingerprint of the arguments.
+    HookRegistered = 44,
+    /// Pre- or post-execution hook removed (#1938). `target` is a fingerprint of the arguments.
+    HookRemoved = 45,
+    /// Keeper hook registered (#1938). `target` is a fingerprint of the arguments.
+    KeeperHookRegistered = 46,
+    /// Keeper hook removed (#1938). `target` is a fingerprint of the arguments.
+    KeeperHookRemoved = 47,
+    /// A milestone of an escrow was marked complete by the funder or arbitrator.
+    MilestoneCompleted = 31,
 }
 
 /// Audit trail entry with cryptographic verification
@@ -1819,6 +1877,8 @@ pub struct RecoveryConfig {
     pub threshold: u32,
     /// Delay in ledgers before recovery can be executed
     pub delay: u64,
+    /// Ledgers a recovery proposal stays live after creation. Zero disables expiry.
+    pub recovery_ttl_ledgers: u64,
 }
 
 impl RecoveryConfig {
@@ -1827,6 +1887,7 @@ impl RecoveryConfig {
             guardians: Vec::new(env),
             threshold: 0,
             delay: 0,
+            recovery_ttl_ledgers: 0,
         }
     }
 }
@@ -1840,6 +1901,7 @@ pub enum RecoveryStatus {
     Approved = 1,
     Executed = 2,
     Cancelled = 3,
+    Expired = 4,
 }
 
 /// Proposal to recover wallet access by replacing signers
@@ -1853,12 +1915,16 @@ pub struct RecoveryProposal {
     pub new_threshold: u32,
     /// Guardians who have approved this proposal
     pub approvals: Vec<Address>,
+    /// Guardians who have voted to cancel an Approved proposal (Issue #1936)
+    pub cancel_votes: Vec<Address>,
     /// Current status
     pub status: RecoveryStatus,
     /// Ledger when the proposal was created
     pub created_at: u64,
     /// Earliest ledger when this recovery can be executed
     pub execution_after: u64,
+    /// Last ledger on which this proposal can still be approved or executed
+    pub expires_at: u64,
 }
 
 /// Recovery configuration change proposal (Issue #1702)
@@ -1984,6 +2050,9 @@ pub struct Escrow {
     pub expires_at: u64,
     /// Ledger when escrow was released/refunded (0 if still active)
     pub finalized_at: u64,
+    /// Ledger when the escrow was disputed (0 if never disputed).
+    /// Arbitration timeout is measured from this ledger.
+    pub disputed_at: u64,
     /// Whether escrow release requires signer voting approval - Issue #1431
     pub requires_signer_approval: bool,
     /// Count of approval votes received - Issue #1431
@@ -2183,6 +2252,8 @@ pub enum FundingMilestoneStatus {
     Submitted,
     /// Milestone has been verified and approved
     Verified,
+    /// Milestone has been verified and its tranche paid out; cannot be paid again
+    Released,
     /// Milestone was rejected
     Rejected,
 }
@@ -2279,7 +2350,10 @@ impl FundingRound {
         let mut verified_amount: i128 = 0;
         for i in 0..self.milestones.len() {
             if let Some(m) = self.milestones.get(i) {
-                if m.status == FundingMilestoneStatus::Verified {
+                if matches!(
+                    m.status,
+                    FundingMilestoneStatus::Verified | FundingMilestoneStatus::Released
+                ) {
                     verified_amount = verified_amount.saturating_add(m.amount);
                 }
             }
@@ -2291,7 +2365,10 @@ impl FundingRound {
     pub fn all_milestones_verified(&self) -> bool {
         for i in 0..self.milestones.len() {
             if let Some(m) = self.milestones.get(i) {
-                if m.status != FundingMilestoneStatus::Verified {
+                if !matches!(
+                    m.status,
+                    FundingMilestoneStatus::Verified | FundingMilestoneStatus::Released
+                ) {
                     return false;
                 }
             }
@@ -2942,6 +3019,10 @@ pub struct InsuranceClaim {
     pub voting_window: u64,
     /// Number of signers eligible to vote, snapshotted at submission.
     pub eligible_voters: u32,
+    /// Signer list snapshotted at submission (claimant excluded). Voters are
+    /// validated against this snapshot so later membership changes cannot
+    /// move the goalposts on an in-flight claim.
+    pub eligible_signers: soroban_sdk::Vec<soroban_sdk::Address>,
     /// Number of distinct voters that have cast a vote so far.
     pub voter_count: u32,
     /// Set once the voting period has been explicitly closed and tallied.
@@ -3162,6 +3243,9 @@ pub struct PaginationCursor {
     pub start_after_id: u64,
     /// Maximum number of items to return (capped at `MAX_PAGE_LIMIT`).
     pub limit: u32,
+}
+
+// ============================================================================
 // Pending Reservation Exposure
 // ============================================================================
 
@@ -3183,6 +3267,18 @@ pub struct PendingReserved {
     pub per_token: Map<Address, i128>,
     /// Per-proposer reserved amounts, keyed by proposer address.
     pub per_proposer: Map<Address, i128>,
+}
+
+/// A post- or pre-execution hook call that failed for a proposal (#1892).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HookFailure {
+    /// Proposal whose execution invoked the hook
+    pub proposal_id: u64,
+    /// Hook contract that failed
+    pub hook: Address,
+    /// True for a pre-execution hook, false for a post-execution hook
+    pub is_pre: bool,
 }
 
 // ============================================================================
@@ -3208,5 +3304,8 @@ pub struct ClawbackRequest {
     pub amount: i128,
     pub reason: Symbol,
     pub status: ClawbackStatus,
+    /// Number of approve votes cast so far (Issue #1911)
+    pub approvals: u32,
+    /// Number of votes (approve or reject) cast so far (Issue #1911)
+    pub votes: u32,
 }
-
