@@ -2238,6 +2238,8 @@ pub enum FundingMilestoneStatus {
     Submitted,
     /// Milestone has been verified and approved
     Verified,
+    /// Milestone has been verified and its tranche paid out; cannot be paid again
+    Released,
     /// Milestone was rejected
     Rejected,
 }
@@ -2334,7 +2336,10 @@ impl FundingRound {
         let mut verified_amount: i128 = 0;
         for i in 0..self.milestones.len() {
             if let Some(m) = self.milestones.get(i) {
-                if m.status == FundingMilestoneStatus::Verified {
+                if matches!(
+                    m.status,
+                    FundingMilestoneStatus::Verified | FundingMilestoneStatus::Released
+                ) {
                     verified_amount = verified_amount.saturating_add(m.amount);
                 }
             }
@@ -2346,7 +2351,10 @@ impl FundingRound {
     pub fn all_milestones_verified(&self) -> bool {
         for i in 0..self.milestones.len() {
             if let Some(m) = self.milestones.get(i) {
-                if m.status != FundingMilestoneStatus::Verified {
+                if !matches!(
+                    m.status,
+                    FundingMilestoneStatus::Verified | FundingMilestoneStatus::Released
+                ) {
                     return false;
                 }
             }
