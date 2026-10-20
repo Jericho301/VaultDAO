@@ -1410,6 +1410,10 @@ pub enum AuditAction {
     PhaseExecuted = 29,
     /// A single phase of a multi-phase proposal failed to execute.
     PhaseFailed = 30,
+    /// A capability token was granted.
+    CapabilityGranted = 31,
+    /// A capability token was revoked.
+    CapabilityRevoked = 32,
     /// Vault paused by an emergency signer or the circuit breaker (#1937).
     /// `target` is the fingerprint of the pause cause.
     VaultPaused = 31,
@@ -3279,4 +3283,3 @@ pub struct ClawbackRequest {
     pub reason: Symbol,
     pub status: ClawbackStatus,
 }
-
