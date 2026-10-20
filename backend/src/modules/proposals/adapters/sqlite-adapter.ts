@@ -25,6 +25,9 @@ const CREATE_TABLE_SQL = `
 
   CREATE INDEX IF NOT EXISTS idx_proposal_activity_contract_id
     ON proposal_activity (contract_id, timestamp ASC);
+
+  CREATE INDEX IF NOT EXISTS idx_proposal_activity_contract_tx_hash
+    ON proposal_activity (contract_id, tx_hash);
 `;
 
 const CREATE_FTS_SQL = `
@@ -105,6 +108,7 @@ export class SqliteProposalActivityAdapter implements SyncProposalActivityPersis
   private readonly stmtInsert: any;
   private readonly stmtGetByProposalId: any;
   private readonly stmtGetByContractId: any;
+  private readonly stmtGetByTransactionHash: any;
   private readonly stmtSummary: any;
   private readonly stmtFtsSearch: any;
   private readonly stmtFtsSearchByProposal: any;
@@ -137,6 +141,12 @@ export class SqliteProposalActivityAdapter implements SyncProposalActivityPersis
     this.stmtGetByContractId = this.db.prepare(`
       SELECT * FROM proposal_activity
       WHERE contract_id = ?
+      ORDER BY timestamp ASC
+    `);
+
+    this.stmtGetByTransactionHash = this.db.prepare(`
+      SELECT * FROM proposal_activity
+      WHERE contract_id = ? AND tx_hash = ?
       ORDER BY timestamp ASC
     `);
 
@@ -235,6 +245,19 @@ export class SqliteProposalActivityAdapter implements SyncProposalActivityPersis
    */
   getByContractId(contractId: string): ProposalActivity[] {
     const rows = this.stmtGetByContractId.all(contractId) as ActivityRow[];
+    return rows.map(rowToActivity);
+  }
+
+  // ── getByTransactionHash ──────────────────────────────────────────────────
+
+  /**
+   * Retrieve activity records for a contract matching a transaction hash.
+   */
+  getByTransactionHash(contractId: string, txHash: string): ProposalActivity[] {
+    const rows = this.stmtGetByTransactionHash.all(
+      contractId,
+      txHash,
+    ) as ActivityRow[];
     return rows.map(rowToActivity);
   }
 
